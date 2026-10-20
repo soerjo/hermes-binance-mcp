@@ -5,3 +5,7 @@ __pycache__/
 .env
 *.log
 .DS_Store
+vpn/wg0.conf
+vpn/client.ovpn
+vpn/*.key
+vpn/*.crt
