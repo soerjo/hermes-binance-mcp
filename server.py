@@ -49,6 +49,24 @@ MCP_HOST        = os.getenv("MCP_HOST", "0.0.0.0")
 
 mcp = MCPServer("binance-futures", version="1.0.0")
 
+import functools
+
+def safe_tool(fn):
+    """Decorator to catch exceptions and return a clean dict instead of crashing FastMCP."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except BinanceAPIError as e:
+            return {"error": f"Binance API error: {e}"}
+        except RiskError as e:
+            return {"error": f"Risk rule blocked: {e}"}
+        except Exception as e:
+            log.exception(f"Tool {fn.__name__} failed: {e}")
+            return {"error": f"Error: {e}"}
+    return wrapper
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _client() -> BinanceClient:
@@ -73,6 +91,7 @@ def _fmt_pos(p: dict) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@safe_tool
 def get_futures_market(symbol: str, interval: str = "4h", limit: int = 200) -> dict:
     """
     Fetch OHLCV klines + 24h ticker + mark price for a single symbol.
@@ -93,6 +112,7 @@ def get_futures_market(symbol: str, interval: str = "4h", limit: int = 200) -> d
 
 
 @mcp.tool()
+@safe_tool
 def scan_market(
     top_n: int = SCAN_TOP_N,
     interval: str = SCAN_INTERVAL,
@@ -159,6 +179,7 @@ def scan_market(
 
 
 @mcp.tool()
+@safe_tool
 def analyze_market(symbol: str, interval: str = "4h") -> dict:
     """
     Full technical analysis on a symbol: RSI, MACD, EMA, Bollinger, ATR, trend, signal.
@@ -192,6 +213,7 @@ def analyze_market(symbol: str, interval: str = "4h") -> dict:
 
 
 @mcp.tool()
+@safe_tool
 def get_funding_rates(symbols: Optional[list] = None) -> list:
     """
     Get current funding rates for given symbols, or top 20 by abs rate if none given.
@@ -216,6 +238,7 @@ def get_funding_rates(symbols: Optional[list] = None) -> list:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@safe_tool
 def get_account_status() -> dict:
     """
     Get current Binance Futures account: balance, margin, open position count.
@@ -244,6 +267,7 @@ def get_account_status() -> dict:
 
 
 @mcp.tool()
+@safe_tool
 def get_open_positions() -> list:
     """
     All open futures positions with health check (OK/WARN/CRITICAL + action).
@@ -261,6 +285,7 @@ def get_open_positions() -> list:
 
 
 @mcp.tool()
+@safe_tool
 def get_open_orders(symbol: Optional[str] = None) -> list:
     """
     Get all open orders (limit / stop / TP orders).
@@ -276,6 +301,7 @@ def get_open_orders(symbol: Optional[str] = None) -> list:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@safe_tool
 def place_futures_order(
     symbol: str,
     side: str,
@@ -408,6 +434,7 @@ def place_futures_order(
 
 
 @mcp.tool()
+@safe_tool
 def close_position(symbol: str) -> dict:
     """
     Market-close an open position and cancel its pending SL/TP orders.
@@ -425,6 +452,7 @@ def close_position(symbol: str) -> dict:
 
 
 @mcp.tool()
+@safe_tool
 def partial_close_position(
     symbol: str,
     percentage: Optional[float] = 50.0,
@@ -508,6 +536,7 @@ def partial_close_position(
 
 
 @mcp.tool()
+@safe_tool
 def set_position_stop_loss(
     symbol: str,
     stop_price: float,
@@ -584,6 +613,7 @@ def set_position_stop_loss(
 
 
 @mcp.tool()
+@safe_tool
 def set_trailing_stop(
     symbol: str,
     callback_rate: float,
@@ -675,6 +705,7 @@ def set_trailing_stop(
 
 
 @mcp.tool()
+@safe_tool
 def set_position_take_profit(
     symbol: str,
     tp_price: float,
@@ -768,6 +799,7 @@ def set_position_take_profit(
 
 
 @mcp.tool()
+@safe_tool
 def cancel_order(symbol: str, order_id: int) -> dict:
     """Cancel a specific open order by ID."""
     with _client() as c:
@@ -775,6 +807,7 @@ def cancel_order(symbol: str, order_id: int) -> dict:
 
 
 @mcp.tool()
+@safe_tool
 def cancel_all_orders(symbol: str) -> dict:
     """Cancel ALL open orders for a symbol (SL, TP, limit)."""
     with _client() as c:
@@ -782,6 +815,7 @@ def cancel_all_orders(symbol: str) -> dict:
 
 
 @mcp.tool()
+@safe_tool
 def set_leverage(symbol: str, leverage: int) -> dict:
     """Set leverage for a symbol (max 10)."""
     if leverage > 10:
@@ -794,6 +828,7 @@ def set_leverage(symbol: str, leverage: int) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+@safe_tool
 def monitor_positions() -> dict:
     """
     Health check all open positions. Returns status, recommended actions,
@@ -835,6 +870,7 @@ def monitor_positions() -> dict:
 
 
 @mcp.tool()
+@safe_tool
 def get_trade_history(limit: int = 20) -> list:
     """
     Get recent realized income (trades, funding, commissions).
