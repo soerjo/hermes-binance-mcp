@@ -62,7 +62,7 @@ Load and apply this skill when Mas says anything like:
 
 **Trigger:** Cron `binance_morning_scan` atau Mas minta scan.
 
-1. Call `get_account_status` → cek balance & kapasitas (max 3 posisi)
+1. Call `get_account_status` → cek balance & kapasitas (max 10 posisi)
 2. Call `scan_market(top_n=15, interval="4h")` → dapatkan ranked opportunities
 3. Untuk setiap sinyal dengan score ≥ 65:
    - Call `analyze_market(symbol, "4h")` → detail full TA
@@ -91,7 +91,7 @@ Load and apply this skill when Mas says anything like:
 
 **Trigger:** Mas minta buka posisi spesifik.
 
-1. Parse intent: symbol, side, leverage (default 5x)
+1. Parse intent: symbol, side, leverage (default 20x)
 2. `get_account_status` → cek balance & posisi terbuka
 3. `analyze_market(symbol)` → ambil ATR untuk auto SL/TP
 4. `get_funding_rates([symbol])` → cek funding rate
@@ -161,7 +161,7 @@ Semua rules ini dijalankan di `risk.py` secara otomatis. Hermes **tidak bisa** d
 | Rule | Nilai |
 |---|---|
 | Max risk per trade | 2% dari available balance |
-| Max posisi bersamaan | 3 |
+| Max posisi bersamaan | 10 |
 | Max leverage | 10x (default 5x) |
 | Funding rate threshold | 0.1% — skip entry jika > ini |
 | Funding blackout | 30 menit sebelum/sesudah funding time |
@@ -186,7 +186,7 @@ Qty: {qty} | Risk: ${risk_usdt}
 ### 📊 Morning Brief
 ```
 📊 Morning Scan — {tanggal}
-Balance: ${balance} | Posisi: {n}/3
+Balance: ${balance} | Posisi: {n}/10
 
 Top Peluang:
 {daftar simbol dengan score}
