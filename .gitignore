@@ -9,3 +9,4 @@ vpn/wg0.conf
 vpn/client.ovpn
 vpn/*.key
 vpn/*.crt
+vpn/servers/
