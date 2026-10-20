@@ -1,12 +1,6 @@
 # Binance Futures MCP Server with VPN Sidecar (Gluetun)
 #
-# Usage:
-#   1. Taruh file config WireGuard di ./vpn/wg0.conf
-#      ATAU OpenVPN di ./vpn/client.ovpn
-#   2. docker compose -f docker-compose.vpn.yml up -d
-#
-# Seluruh trafik outbound binance-mcp otomatis dilewatkan ke VPN tunnel.
-# Port SSE 8811 tetap terbuka di 127.0.0.1:8811 untuk Nana.
+# Configured for OpenVPN custom config in ./vpn/client.ovpn
 
 services:
   vpn:
@@ -18,27 +12,25 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
-      # Port SSE diexpose lewat VPN container ke localhost host
       - "127.0.0.1:8811:8811"
     volumes:
       - ./vpn:/gluetun
     environment:
       - VPN_SERVICE_PROVIDER=custom
-      - VPN_TYPE=wireguard   # atau openvpn
-      - WIREGUARD_CONF_FILE=/gluetun/wg0.conf
+      - VPN_TYPE=openvpn
+      - OPENVPN_CUSTOM_CONFIG=/gluetun/client.ovpn
     healthcheck:
       test: ["CMD", "ping", "-c", "1", "1.1.1.1"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 45s
 
   binance-mcp:
     build: .
     image: hermes-binance-mcp-binance-mcp:latest
     container_name: binance-mcp
     restart: unless-stopped
-    # Share network stack dengan VPN container
     network_mode: "service:vpn"
     depends_on:
       vpn:
