@@ -1,7 +1,7 @@
 # hermes-binance-mcp
 
 Autonomous Binance Futures trading MCP server for [Hermes Agent](https://github.com/NousResearch/hermes-agent).  
-Exposes **14 tools** via MCP so Hermes can scan markets, generate signals, and execute orders — fully autonomous.
+Exposes **18 tools** via MCP so Hermes can scan markets, generate signals, and execute orders — fully autonomous.
 
 ## Architecture
 
@@ -33,7 +33,11 @@ binance-mcp container
 | `get_open_positions` | All positions with health status (OK/WARN/CRITICAL) |
 | `get_open_orders` | Pending SL/TP/limit orders |
 | `place_futures_order` | Open LONG/SHORT — auto sizing, auto SL/TP via ATR |
-| `close_position` | Market-close + cancel SL/TP orders |
+| `close_position` | Market-close 100% of position + cancel its orders |
+| `partial_close_position` | Close partial (e.g. 50%) of active position (MARKET or LIMIT) |
+| `set_position_stop_loss` | Set or update SL (STOP_MARKET) on an active position |
+| `set_trailing_stop` | Place native Binance dynamic Trailing Stop (callback 0.1-5%) |
+| `set_position_take_profit` | Set target TP order (supports partial TP e.g. 50%) |
 | `cancel_order` | Cancel one order by ID |
 | `cancel_all_orders` | Cancel all orders for a symbol |
 | `set_leverage` | Set leverage (max 10×) |

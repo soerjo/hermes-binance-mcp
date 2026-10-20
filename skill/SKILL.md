@@ -32,7 +32,11 @@ This skill defines all workflows, rules, and behaviors Hermes must follow.
 | `get_open_positions` | All open positions with health status |
 | `get_open_orders` | Pending SL/TP/limit orders |
 | `place_futures_order` | Open new LONG or SHORT with auto SL/TP |
-| `close_position` | Market-close a position + cancel its orders |
+| `close_position` | Market-close 100% of a position + cancel its orders |
+| `partial_close_position` | Close partial amount (e.g. 50%) of active position |
+| `set_position_stop_loss` | Set or update SL (STOP_MARKET) on active position |
+| `set_trailing_stop` | Set native Binance dynamic Trailing Stop (callback 0.1-5%) |
+| `set_position_take_profit` | Set target TP order (supports partial TP e.g. 50%) |
 | `cancel_order` | Cancel single order by ID |
 | `cancel_all_orders` | Cancel all orders for a symbol |
 | `set_leverage` | Set leverage before opening |
@@ -126,6 +130,29 @@ Load and apply this skill when Mas says anything like:
 5. Format: "💸 Funding in 5min: {symbol} bayar ${amount} (rate: {rate}%)"
 
 ---
+
+
+---
+
+## Workflow: Managing Active Positions (Partial TP & Trailing Stop)
+
+Gunakan workflow ini saat Mas meminta take profit sebagian atau pasang trailing stop pada posisi yang SUDAH BERJALAN:
+
+### 1. Partial Take Profit (50% atau X%)
+- Jika Mas minta **"TP 50% sekarang"** (eksekusi langsung):
+  👉 Panggil: `partial_close_position(symbol="SUIUSDT", percentage=50.0, order_type="MARKET")`
+- Jika Mas minta **"Pasang TP di harga target X untuk 50% posisi"**:
+  👉 Panggil: `set_position_take_profit(symbol="SUIUSDT", tp_price=1.05, percentage=50.0, order_type="LIMIT")`
+
+### 2. Trailing Stop Otomatis (Binance Dynamic Trailing Stop)
+- Jika Mas minta **"Pasang trailing stop X%"**:
+  👉 Panggil: `set_trailing_stop(symbol="SUIUSDT", callback_rate=1.5, cancel_existing_sl=True)`
+  *(Order ini otomatis mengikuti kenaikan harga dengan jarak 1.5%. Jika harga berbalik turun 1.5% dari puncak, posisi otomatis ditutup).*
+
+### 3. Update Stop Loss / Geser ke Breakeven (Manual SL Baru)
+- Jika Mas minta **"Geser SL ke breakeven / harga entry"** atau ke harga tertentu:
+  👉 Panggil: `set_position_stop_loss(symbol="SUIUSDT", stop_price=1.0085, cancel_existing_sl=True)`
+  *(Otomatis membatalkan STOP_MARKET lama dan memasang STOP_MARKET baru pada posisi aktif).*
 
 ## Risk Rules — NON-NEGOTIABLE
 

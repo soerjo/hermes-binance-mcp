@@ -425,6 +425,349 @@ def close_position(symbol: str) -> dict:
 
 
 @mcp.tool()
+def partial_close_position(
+    symbol: str,
+    percentage: Optional[float] = 50.0,
+    qty: Optional[float] = None,
+    order_type: str = "MARKET",
+    price: Optional[float] = None,
+) -> dict:
+    """
+    Close a partial amount (e.g. 50%) or specific quantity of an EXISTING open position.
+    Uses reduceOnly=True to guarantee no reverse position is opened.
+
+    Args:
+        symbol: e.g. "SUIUSDT", "1000PEPEUSDT", "PHAUSDT"
+        percentage: percentage of position to close (e.g. 50.0 for 50%, 25.0, 75.0)
+        qty: manual quantity override (used if percentage is None)
+        order_type: "MARKET" (immediate execution) or "LIMIT" (at specific price)
+        price: target limit price (required if order_type="LIMIT")
+    """
+    import math
+
+    with _client() as c:
+        positions = c.get_position_risk(symbol)
+        exchange_info = c.get_exchange_info()
+
+    open_pos = [p for p in positions if p.get("symbol") == symbol and float(p.get("positionAmt", 0)) != 0]
+    if not open_pos:
+        return {"error": f"No active open position found for {symbol}"}
+
+    pos = open_pos[0]
+    pos_amt = float(pos.get("positionAmt", 0))
+    current_size = abs(pos_amt)
+    side = "SELL" if pos_amt > 0 else "BUY"
+
+    if percentage is not None:
+        if percentage <= 0 or percentage > 100:
+            return {"error": "percentage must be between 1 and 100"}
+        raw_qty = current_size * (percentage / 100.0)
+    elif qty is not None:
+        raw_qty = qty
+    else:
+        return {"error": "Must provide either percentage or qty"}
+
+    precision = get_symbol_precision(exchange_info, symbol)
+    step = 10 ** -precision["qty_precision"]
+    order_qty = round(math.floor(raw_qty / step) * step, precision["qty_precision"])
+
+    if order_qty <= 0:
+        return {"error": f"Calculated close qty {order_qty} is 0. Position size too small or precision issue."}
+
+    order_params = {
+        "symbol": symbol,
+        "side": side,
+        "type": order_type,
+        "quantity": order_qty,
+        "reduceOnly": True,
+    }
+
+    if order_type == "LIMIT":
+        if price is None:
+            return {"error": "price is required when order_type is LIMIT"}
+        order_params["price"] = round(price, precision["price_precision"])
+        order_params["timeInForce"] = "GTC"
+
+    log.info(f"Partial closing {symbol}: {order_qty} (target ~{percentage}%) via {order_type}")
+
+    with _client() as c:
+        order_res = c.place_order(**order_params)
+
+    remaining_approx = round(current_size - order_qty, precision["qty_precision"])
+    return {
+        "symbol": symbol,
+        "action": "PARTIAL_CLOSE",
+        "closed_qty": order_qty,
+        "original_size": current_size,
+        "remaining_size_approx": remaining_approx,
+        "percentage_target": percentage,
+        "side": side,
+        "order_type": order_type,
+        "order_result": order_res,
+    }
+
+
+@mcp.tool()
+def set_position_stop_loss(
+    symbol: str,
+    stop_price: float,
+    cancel_existing_sl: bool = True,
+) -> dict:
+    """
+    Set or update Stop Loss (STOP_MARKET) for an EXISTING open position.
+    Can be used to move SL to breakeven or trail stop manually.
+
+    Args:
+        symbol: e.g. "SUIUSDT", "1000PEPEUSDT", "PHAUSDT"
+        stop_price: trigger price for the stop loss
+        cancel_existing_sl: cancel existing STOP_MARKET orders for this symbol first (default True)
+    """
+    with _client() as c:
+        positions = c.get_position_risk(symbol)
+        exchange_info = c.get_exchange_info()
+
+    open_pos = [p for p in positions if p.get("symbol") == symbol and float(p.get("positionAmt", 0)) != 0]
+    if not open_pos:
+        return {"error": f"No active open position found for {symbol}"}
+
+    pos = open_pos[0]
+    pos_amt = float(pos.get("positionAmt", 0))
+    sl_side = "SELL" if pos_amt > 0 else "BUY"
+
+    cancelled = []
+    if cancel_existing_sl:
+        with _client() as c:
+            open_orders = c.get_open_orders(symbol)
+            for o in open_orders:
+                if o.get("type") in ("STOP_MARKET", "STOP"):
+                    try:
+                        c.cancel_order(symbol, o["orderId"])
+                        cancelled.append(o["orderId"])
+                    except Exception as e:
+                        log.warning(f"Failed to cancel old SL {o['orderId']}: {e}")
+
+    precision = get_symbol_precision(exchange_info, symbol)
+    stop_price_r = round(stop_price, precision["price_precision"])
+
+    log.info(f"Setting SL for {symbol} to {stop_price_r} (side={sl_side})")
+
+    with _client() as c:
+        try:
+            order_res = c.place_order(
+                symbol=symbol,
+                side=sl_side,
+                type="STOP_MARKET",
+                stopPrice=stop_price_r,
+                closePosition=True,
+                timeInForce="GTC",
+            )
+        except BinanceAPIError as e:
+            log.warning(f"closePosition=True failed, trying reduceOnly: {e}")
+            order_res = c.place_order(
+                symbol=symbol,
+                side=sl_side,
+                type="STOP_MARKET",
+                stopPrice=stop_price_r,
+                quantity=abs(pos_amt),
+                reduceOnly=True,
+                timeInForce="GTC",
+            )
+
+    return {
+        "symbol": symbol,
+        "action": "SET_STOP_LOSS",
+        "new_stop_price": stop_price_r,
+        "position_side": "LONG" if pos_amt > 0 else "SHORT",
+        "cancelled_previous_sl": cancelled,
+        "order_result": order_res,
+    }
+
+
+@mcp.tool()
+def set_trailing_stop(
+    symbol: str,
+    callback_rate: float,
+    activation_price: Optional[float] = None,
+    quantity: Optional[float] = None,
+    percentage: float = 100.0,
+    cancel_existing_sl: bool = True,
+) -> dict:
+    """
+    Place a native Binance TRAILING_STOP_MARKET order on an EXISTING open position.
+    The stop price dynamically trails market price by `callback_rate` percent.
+
+    Args:
+        symbol: e.g. "SUIUSDT", "1000PEPEUSDT", "PHAUSDT"
+        callback_rate: percentage to trail behind peak (0.1 to 5.0, e.g. 1.0 for 1%, 2.0 for 2%)
+        activation_price: price level that must be reached before trailing activates (optional)
+        quantity: manual quantity to trail (if None, derived from percentage)
+        percentage: percentage of current position to protect with trailing stop (default 100.0)
+        cancel_existing_sl: cancel prior STOP_MARKET orders so stops don't conflict (default True)
+    """
+    import math
+
+    if callback_rate < 0.1 or callback_rate > 5.0:
+        return {"error": "callback_rate must be between 0.1% and 5.0%"}
+
+    with _client() as c:
+        positions = c.get_position_risk(symbol)
+        exchange_info = c.get_exchange_info()
+
+    open_pos = [p for p in positions if p.get("symbol") == symbol and float(p.get("positionAmt", 0)) != 0]
+    if not open_pos:
+        return {"error": f"No active open position found for {symbol}"}
+
+    pos = open_pos[0]
+    pos_amt = float(pos.get("positionAmt", 0))
+    current_size = abs(pos_amt)
+    side = "SELL" if pos_amt > 0 else "BUY"
+
+    precision = get_symbol_precision(exchange_info, symbol)
+    step = 10 ** -precision["qty_precision"]
+
+    if quantity is not None:
+        raw_qty = quantity
+    else:
+        raw_qty = current_size * (percentage / 100.0)
+
+    order_qty = round(math.floor(raw_qty / step) * step, precision["qty_precision"])
+    if order_qty <= 0:
+        return {"error": "Calculated trailing stop qty is 0. Check size."}
+
+    cancelled = []
+    if cancel_existing_sl:
+        with _client() as c:
+            open_orders = c.get_open_orders(symbol)
+            for o in open_orders:
+                if o.get("type") in ("STOP_MARKET", "STOP", "TRAILING_STOP_MARKET"):
+                    try:
+                        c.cancel_order(symbol, o["orderId"])
+                        cancelled.append(o["orderId"])
+                    except Exception as e:
+                        log.warning(f"Failed to cancel old stop order {o['orderId']}: {e}")
+
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "TRAILING_STOP_MARKET",
+        "quantity": order_qty,
+        "callbackRate": round(callback_rate, 1),
+        "reduceOnly": True,
+    }
+
+    if activation_price is not None:
+        params["activationPrice"] = round(activation_price, precision["price_precision"])
+
+    log.info(f"Placing Trailing Stop on {symbol}: qty={order_qty}, rate={callback_rate}%")
+
+    with _client() as c:
+        order_res = c.place_order(**params)
+
+    return {
+        "symbol": symbol,
+        "action": "SET_TRAILING_STOP",
+        "callback_rate": callback_rate,
+        "activation_price": activation_price,
+        "quantity": order_qty,
+        "cancelled_previous_sl": cancelled,
+        "order_result": order_res,
+    }
+
+
+@mcp.tool()
+def set_position_take_profit(
+    symbol: str,
+    tp_price: float,
+    percentage: float = 50.0,
+    qty: Optional[float] = None,
+    order_type: str = "TAKE_PROFIT_MARKET",
+    cancel_existing_tp: bool = False,
+) -> dict:
+    """
+    Set a Take Profit target on an EXISTING open position (supports partial TP e.g. 50%).
+
+    Args:
+        symbol: e.g. "SUIUSDT", "1000PEPEUSDT", "PHAUSDT"
+        tp_price: target price to take profit
+        percentage: percentage of position to TP (default 50.0 for partial TP)
+        qty: manual quantity override
+        order_type: "TAKE_PROFIT_MARKET" or "LIMIT"
+        cancel_existing_tp: cancel prior TP orders for this symbol first (default False)
+    """
+    import math
+
+    with _client() as c:
+        positions = c.get_position_risk(symbol)
+        exchange_info = c.get_exchange_info()
+
+    open_pos = [p for p in positions if p.get("symbol") == symbol and float(p.get("positionAmt", 0)) != 0]
+    if not open_pos:
+        return {"error": f"No active open position found for {symbol}"}
+
+    pos = open_pos[0]
+    pos_amt = float(pos.get("positionAmt", 0))
+    current_size = abs(pos_amt)
+    side = "SELL" if pos_amt > 0 else "BUY"
+
+    precision = get_symbol_precision(exchange_info, symbol)
+    step = 10 ** -precision["qty_precision"]
+
+    if qty is not None:
+        raw_qty = qty
+    else:
+        raw_qty = current_size * (percentage / 100.0)
+
+    order_qty = round(math.floor(raw_qty / step) * step, precision["qty_precision"])
+    if order_qty <= 0:
+        return {"error": "Calculated TP qty is 0. Check size."}
+
+    cancelled = []
+    if cancel_existing_tp:
+        with _client() as c:
+            open_orders = c.get_open_orders(symbol)
+            for o in open_orders:
+                if o.get("type") in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
+                    try:
+                        c.cancel_order(symbol, o["orderId"])
+                        cancelled.append(o["orderId"])
+                    except Exception as e:
+                        log.warning(f"Failed to cancel old TP order {o['orderId']}: {e}")
+
+    tp_price_r = round(tp_price, precision["price_precision"])
+
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": order_type,
+        "quantity": order_qty,
+        "reduceOnly": True,
+    }
+
+    if order_type == "LIMIT":
+        params["price"] = tp_price_r
+        params["timeInForce"] = "GTC"
+    else:
+        params["stopPrice"] = tp_price_r
+        params["timeInForce"] = "GTC"
+
+    log.info(f"Setting TP for {symbol}: qty={order_qty} at {tp_price_r}")
+
+    with _client() as c:
+        order_res = c.place_order(**params)
+
+    return {
+        "symbol": symbol,
+        "action": "SET_TAKE_PROFIT",
+        "tp_price": tp_price_r,
+        "quantity": order_qty,
+        "percentage": percentage,
+        "order_type": order_type,
+        "cancelled_previous_tp": cancelled,
+        "order_result": order_res,
+    }
+
+
+@mcp.tool()
 def cancel_order(symbol: str, order_id: int) -> dict:
     """Cancel a specific open order by ID."""
     with _client() as c:
