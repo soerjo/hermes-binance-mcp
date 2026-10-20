@@ -1,0 +1,50 @@
+# Binance Futures MCP Server — Docker Compose
+#
+# Usage:
+#   cp .env.template .env   # fill in API keys
+#   docker compose up -d
+#
+# Hermes config.yaml — tambah di mcp_servers:
+#   binance:
+#     url: http://localhost:8811/sse
+#     enabled: true
+
+services:
+  binance-mcp:
+    build: .
+    container_name: binance-mcp
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8811:8811"   # localhost-only by default
+    env_file:
+      - .env
+    environment:
+      MCP_TRANSPORT: sse
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8811"
+      LOG_LEVEL: INFO
+      # Optional: set BINANCE_PROXY in .env if IP is blocked
+      # BINANCE_PROXY: socks5://host.docker.internal:1080
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import httpx; httpx.get('http://localhost:8811/sse', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: jika butuh SOCKS5 proxy untuk bypass Binance IP block
+  # Uncomment dan sesuaikan jika perlu
+  #
+  # gost-proxy:
+  #   image: ginuerzh/gost:latest
+  #   container_name: gost-proxy
+  #   restart: unless-stopped
+  #   command: -L "socks5://:1080" -F "your-upstream-proxy"
+  #   ports:
+  #     - "127.0.0.1:1080:1080"
