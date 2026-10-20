@@ -1,9 +1,7 @@
 """
-Binance Futures REST client (USDT-M, fapi.binance.com).
-All signing, timestamping, and error-handling are centralised here.
+Thin synchronous wrapper around the Binance USDT-M Futures REST API.
+Production Base URL: https://fapi.binance.com
 """
-
-from __future__ import annotations
 
 import hashlib
 import hmac
@@ -17,16 +15,12 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://fapi.binance.com"
-RECV_WINDOW = 5000  # ms
+BASE_URL: str = "https://fapi.binance.com"
+RECV_WINDOW: int = 30000  # 30s to absorb VPN latency jitter
 
-
-# ---------------------------------------------------------------------------
-# Custom exception
-# ---------------------------------------------------------------------------
 
 class BinanceAPIError(Exception):
-    """Raised when Binance returns a non-2xx response or an error payload."""
+    """Raised when the Binance API returns a non-2xx status or an error payload."""
 
     def __init__(self, code: int, msg: str) -> None:
         self.code = code
@@ -34,27 +28,37 @@ class BinanceAPIError(Exception):
         super().__init__(f"BinanceAPIError code={code}: {msg}")
 
 
-# ---------------------------------------------------------------------------
-# Client
-# ---------------------------------------------------------------------------
+def _clean_params(params: dict[str, Any]) -> dict[str, str]:
+    """
+    Format query parameters for Binance:
+    - Booleans must be lowercase string 'true' / 'false'
+    - None values stripped
+    - All values converted to string
+    """
+    cleaned: dict[str, str] = {}
+    for k, v in params.items():
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            cleaned[k] = "true" if v else "false"
+        else:
+            cleaned[k] = str(v)
+    return cleaned
+
 
 class BinanceClient:
     """
-    Thin synchronous wrapper around the Binance USDT-M Futures REST API.
-
-    Credentials are read from the environment:
-        BINANCE_API_KEY
-        BINANCE_API_SECRET
+    Synchronous wrapper around the Binance USDT-M Futures REST API.
+    Credentials are read from environment: BINANCE_API_KEY, BINANCE_API_SECRET
     """
 
     def __init__(self) -> None:
         self._api_key: str = os.environ["BINANCE_API_KEY"]
         self._api_secret: str = os.environ["BINANCE_API_SECRET"]
-        # Optional HTTP/HTTPS proxy — set HTTPS_PROXY or BINANCE_PROXY env var
         _proxy = os.environ.get("BINANCE_PROXY") or os.environ.get("HTTPS_PROXY") or None
         self._http = httpx.Client(
             base_url=BASE_URL,
-            timeout=10.0,
+            timeout=15.0,
             headers={
                 "X-MBX-APIKEY": self._api_key,
                 "Content-Type": "application/x-www-form-urlencoded",
@@ -66,18 +70,21 @@ class BinanceClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _sign(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Add timestamp + recvWindow then append HMAC-SHA256 signature."""
-        params["timestamp"] = int(time.time() * 1000)
-        params["recvWindow"] = RECV_WINDOW
-        query = urlencode(params)
+    def _sign(self, params: dict[str, Any]) -> str:
+        """
+        Add timestamp + recvWindow, format booleans, compute HMAC-SHA256.
+        Returns the exact URL-encoded query string including signature.
+        """
+        cleaned = _clean_params(params)
+        cleaned["timestamp"] = str(int(time.time() * 1000))
+        cleaned["recvWindow"] = str(RECV_WINDOW)
+        query = urlencode(cleaned)
         signature = hmac.new(
             self._api_secret.encode("utf-8"),
             query.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        params["signature"] = signature
-        return params
+        return f"{query}&signature={signature}"
 
     def _get(
         self,
@@ -87,9 +94,13 @@ class BinanceClient:
     ) -> Any:
         params = params or {}
         if signed:
-            params = self._sign(params)
-        logger.debug("GET %s params=%s", path, params)
-        resp = self._http.get(path, params=params)
+            full_query = self._sign(params)
+            url = f"{path}?{full_query}"
+            logger.debug("GET %s", url)
+            resp = self._http.get(url)
+        else:
+            cleaned = _clean_params(params)
+            resp = self._http.get(path, params=cleaned)
         return self._handle(resp)
 
     def _post(
@@ -100,9 +111,13 @@ class BinanceClient:
     ) -> Any:
         params = params or {}
         if signed:
-            params = self._sign(params)
-        logger.debug("POST %s params=%s", path, params)
-        resp = self._http.post(path, data=params)
+            full_query = self._sign(params)
+            url = f"{path}?{full_query}"
+            logger.debug("POST %s", url)
+            resp = self._http.post(url)
+        else:
+            cleaned = _clean_params(params)
+            resp = self._http.post(path, data=cleaned)
         return self._handle(resp)
 
     def _delete(
@@ -113,9 +128,13 @@ class BinanceClient:
     ) -> Any:
         params = params or {}
         if signed:
-            params = self._sign(params)
-        logger.debug("DELETE %s params=%s", path, params)
-        resp = self._http.request("DELETE", path, params=params)
+            full_query = self._sign(params)
+            url = f"{path}?{full_query}"
+            logger.debug("DELETE %s", url)
+            resp = self._http.delete(url)
+        else:
+            cleaned = _clean_params(params)
+            resp = self._http.delete(path, params=cleaned)
         return self._handle(resp)
 
     @staticmethod
@@ -130,21 +149,19 @@ class BinanceClient:
         if isinstance(data, dict) and data.get("code", 0) < 0:
             raise BinanceAPIError(data["code"], data.get("msg", "unknown error"))
 
-        if not resp.is_success:
-            raise BinanceAPIError(resp.status_code, resp.text)
-
+        resp.raise_for_status()
         return data
 
     # ------------------------------------------------------------------
-    # Public / market endpoints (unsigned)
+    # Public market data
     # ------------------------------------------------------------------
 
     def get_server_time(self) -> dict[str, Any]:
-        """Return Binance server timestamp."""
+        """Check server connectivity and get current Binance server time."""
         return self._get("/fapi/v1/time")
 
     def get_exchange_info(self) -> dict[str, Any]:
-        """Return exchange metadata: symbols, filters, rate limits, etc."""
+        """Fetch current exchange trading rules and symbol information."""
         return self._get("/fapi/v1/exchangeInfo")
 
     def get_klines(
@@ -153,68 +170,58 @@ class BinanceClient:
         interval: str,
         limit: int = 200,
     ) -> list[list[Any]]:
-        """
-        Return OHLCV candlestick data.
-
-        Each element: [open_time, open, high, low, close, volume,
-                       close_time, quote_volume, trades,
-                       taker_buy_base_vol, taker_buy_quote_vol, ignore]
-        """
+        """Fetch historical klines (candlestick) data."""
         return self._get(
             "/fapi/v1/klines",
             params={"symbol": symbol, "interval": interval, "limit": limit},
         )
 
     def get_ticker_24hr(
-        self, symbol: Optional[str] = None
-    ) -> dict[str, Any] | list[dict[str, Any]]:
-        """Return 24-hour rolling price statistics (single or all symbols)."""
-        params: dict[str, Any] = {}
-        if symbol:
-            params["symbol"] = symbol
+        self,
+        symbol: Optional[str] = None,
+    ) -> Any:
+        """Fetch 24-hour rolling window price change statistics."""
+        params = {"symbol": symbol} if symbol else {}
         return self._get("/fapi/v1/ticker/24hr", params=params)
 
     def get_book_ticker(self, symbol: str) -> dict[str, Any]:
-        """Return best bid/ask price and quantity for *symbol*."""
+        """Fetch best price/qty on the order book for a symbol."""
         return self._get("/fapi/v1/ticker/bookTicker", params={"symbol": symbol})
 
     def get_mark_price(
-        self, symbol: Optional[str] = None
-    ) -> dict[str, Any] | list[dict[str, Any]]:
-        """Return mark price, index price, funding rate, and next funding countdown."""
-        params: dict[str, Any] = {}
-        if symbol:
-            params["symbol"] = symbol
+        self,
+        symbol: Optional[str] = None,
+    ) -> Any:
+        """Fetch mark price and funding rate."""
+        params = {"symbol": symbol} if symbol else {}
         return self._get("/fapi/v1/premiumIndex", params=params)
 
     # ------------------------------------------------------------------
-    # Account / signed endpoints
+    # Account & Position (SIGNED)
     # ------------------------------------------------------------------
 
     def get_account(self) -> dict[str, Any]:
-        """Return account info: balances, positions, and margin summary."""
+        """Fetch current account information (balances, margin, canTrade)."""
         return self._get("/fapi/v2/account", signed=True)
 
     def get_position_risk(
-        self, symbol: Optional[str] = None
+        self,
+        symbol: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Return open positions with unrealized PnL and leverage details."""
-        params: dict[str, Any] = {}
-        if symbol:
-            params["symbol"] = symbol
+        """Fetch current position information with unrealized PnL."""
+        params = {"symbol": symbol} if symbol else {}
         return self._get("/fapi/v2/positionRisk", params=params, signed=True)
 
     def get_open_orders(
-        self, symbol: Optional[str] = None
+        self,
+        symbol: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Return all open orders, optionally filtered by *symbol*."""
-        params: dict[str, Any] = {}
-        if symbol:
-            params["symbol"] = symbol
+        """Fetch all open standard orders."""
+        params = {"symbol": symbol} if symbol else {}
         return self._get("/fapi/v1/openOrders", params=params, signed=True)
 
     def get_income_history(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Return recent income history (realised PnL, funding, commissions)."""
+        """Fetch income history (realized PnL, funding fees, commissions)."""
         return self._get(
             "/fapi/v1/income",
             params={"limit": limit},
@@ -222,11 +229,11 @@ class BinanceClient:
         )
 
     # ------------------------------------------------------------------
-    # Order / position management
+    # Standard Order Management (SIGNED)
     # ------------------------------------------------------------------
 
     def change_leverage(self, symbol: str, leverage: int) -> dict[str, Any]:
-        """Set the initial leverage for *symbol* (1-125)."""
+        """Change user's initial leverage of specific symbol market."""
         return self._post(
             "/fapi/v1/leverage",
             params={"symbol": symbol, "leverage": leverage},
@@ -234,16 +241,7 @@ class BinanceClient:
         )
 
     def change_margin_type(self, symbol: str, margin_type: str) -> dict[str, Any]:
-        """
-        Switch margin type for *symbol*.
-
-        *margin_type*: ``"ISOLATED"`` or ``"CROSSED"``
-        """
-        margin_type = margin_type.upper()
-        if margin_type not in ("ISOLATED", "CROSSED"):
-            raise ValueError(
-                f"margin_type must be ISOLATED or CROSSED, got {margin_type!r}"
-            )
+        """Change margin type to ISOLATED or CROSSED."""
         return self._post(
             "/fapi/v1/marginType",
             params={"symbol": symbol, "marginType": margin_type},
@@ -252,17 +250,12 @@ class BinanceClient:
 
     def place_order(self, **kwargs: Any) -> dict[str, Any]:
         """
-        Place any order type on Binance Futures.
-
-        Required kwargs: ``symbol``, ``side``, ``type``.
-        Optional kwargs follow the Binance Futures REST spec verbatim
-        (e.g. ``quantity``, ``price``, ``timeInForce``, ``positionSide``,
-        ``stopPrice``, ``closePosition``, ``reduceOnly``, etc.).
+        Place standard order on Binance Futures (MARKET, LIMIT).
         """
         return self._post("/fapi/v1/order", params=dict(kwargs), signed=True)
 
     def cancel_order(self, symbol: str, order_id: int) -> dict[str, Any]:
-        """Cancel a single order by *order_id*."""
+        """Cancel a single standard order by order_id."""
         return self._delete(
             "/fapi/v1/order",
             params={"symbol": symbol, "orderId": order_id},
@@ -270,12 +263,38 @@ class BinanceClient:
         )
 
     def cancel_all_orders(self, symbol: str) -> dict[str, Any]:
-        """Cancel *all* open orders for *symbol*."""
+        """Cancel all open standard orders for symbol."""
         return self._delete(
             "/fapi/v1/allOpenOrders",
             params={"symbol": symbol},
             signed=True,
         )
+
+    # ------------------------------------------------------------------
+    # Algo & Conditional Order Management (SIGNED)
+    # Required for STOP_MARKET, TAKE_PROFIT_MARKET, TRAILING_STOP_MARKET
+    # ------------------------------------------------------------------
+
+    def place_algo_order(self, **kwargs: Any) -> dict[str, Any]:
+        """Place a conditional order (STOP_MARKET, TAKE_PROFIT_MARKET, TRAILING_STOP_MARKET)."""
+        return self._post("/fapi/v1/algoOrder", params=dict(kwargs), signed=True)
+
+    def cancel_algo_order(self, symbol: str, algo_id: int) -> dict[str, Any]:
+        """Cancel a conditional algo order by algoId."""
+        return self._delete(
+            "/fapi/v1/algoOrder",
+            params={"symbol": symbol, "algoId": algo_id},
+            signed=True,
+        )
+
+    def get_open_algo_orders(
+        self,
+        symbol: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch open conditional algo orders."""
+        params = {"symbol": symbol} if symbol else {}
+        res = self._get("/fapi/v1/openAlgoOrders", params=params, signed=True)
+        return res if isinstance(res, list) else res.get("orders", [])
 
     def close_position(
         self,
@@ -283,72 +302,37 @@ class BinanceClient:
         position_side: str = "BOTH",
     ) -> dict[str, Any]:
         """
-        Market-close an open position.
-
-        Queries current position risk to determine size and direction,
-        then submits a reducing market order.
-
-        *position_side*: ``"BOTH"`` (one-way mode), ``"LONG"``, or ``"SHORT"``
-                         (hedge mode).
+        Close an existing position at market price with reduceOnly=true.
         """
-        position_side = position_side.upper()
         positions = self.get_position_risk(symbol=symbol)
-
-        # Locate the matching position entry
-        target: Optional[dict[str, Any]] = None
-        for pos in positions:
-            if pos.get("symbol") != symbol:
-                continue
-            if position_side == "BOTH":
-                # One-way mode: match the first non-zero quantity entry
-                if float(pos.get("positionAmt", 0)) != 0:
-                    target = pos
-                    break
-            else:
-                if pos.get("positionSide") == position_side:
-                    target = pos
-                    break
-
-        if target is None:
-            raise BinanceAPIError(
-                -1, f"No open {position_side} position found for {symbol}"
-            )
-
-        qty = float(target["positionAmt"])
-        if qty == 0:
-            raise BinanceAPIError(-1, f"Position for {symbol} has zero quantity")
-
-        # Closing side is opposite to current exposure
-        close_side = "SELL" if qty > 0 else "BUY"
-        abs_qty = abs(qty)
-
-        order_params: dict[str, Any] = {
-            "symbol": symbol,
-            "side": close_side,
-            "type": "MARKET",
-            "quantity": abs_qty,
-            "reduceOnly": "true",
-        }
-        if position_side != "BOTH":
-            # reduceOnly is incompatible with explicit positionSide in hedge mode
-            del order_params["reduceOnly"]
-            order_params["positionSide"] = position_side
-
-        logger.debug(
-            "close_position %s side=%s qty=%s", symbol, close_side, abs_qty
+        pos = next(
+            (p for p in positions if p.get("symbol") == symbol and float(p.get("positionAmt", 0)) != 0),
+            None,
         )
-        return self.place_order(**order_params)
+        if pos is None:
+            return {"symbol": symbol, "status": "NO_OPEN_POSITION"}
+
+        amt = float(pos["positionAmt"])
+        side = "SELL" if amt > 0 else "BUY"
+        qty = abs(amt)
+
+        return self.place_order(
+            symbol=symbol,
+            side=side,
+            type="MARKET",
+            quantity=qty,
+            reduceOnly=True,
+        )
 
     # ------------------------------------------------------------------
-    # Context-manager support
+    # Context manager & cleanup
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the underlying HTTP connection pool."""
         self._http.close()
 
     def __enter__(self) -> "BinanceClient":
         return self
 
-    def __exit__(self, *_: Any) -> None:
+    def __exit__(self, *args: Any) -> None:
         self.close()

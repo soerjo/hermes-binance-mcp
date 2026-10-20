@@ -406,19 +406,35 @@ def place_futures_order(
             symbol=symbol, side=order_side, type="MARKET",
             quantity=order_qty, reduceOnly=False,
         )
+        # Stop-loss via Algo Order API
         try:
-            results["stop_loss"] = c.place_order(
-                symbol=symbol, side=sl_side, type="STOP_MARKET",
-                stopPrice=sl_price_r, closePosition=True, timeInForce="GTC",
+            results["stop_loss"] = c.place_algo_order(
+                symbol=symbol,
+                side=sl_side,
+                type="STOP_MARKET",
+                algoType="CONDITIONAL",
+                triggerPrice=sl_price_r,
+                quantity=order_qty,
+                positionSide="BOTH",
+                reduceOnly=True,
+                workingType="CONTRACT_PRICE",
             )
         except BinanceAPIError as e:
             results["stop_loss_error"] = str(e)
             log.error(f"SL failed {symbol}: {e}")
 
+        # Take-profit via Algo Order API
         try:
-            results["take_profit"] = c.place_order(
-                symbol=symbol, side=tp_side, type="TAKE_PROFIT_MARKET",
-                stopPrice=tp_price_r, closePosition=True, timeInForce="GTC",
+            results["take_profit"] = c.place_algo_order(
+                symbol=symbol,
+                side=tp_side,
+                type="TAKE_PROFIT_MARKET",
+                algoType="CONDITIONAL",
+                triggerPrice=tp_price_r,
+                quantity=order_qty,
+                positionSide="BOTH",
+                reduceOnly=True,
+                workingType="CONTRACT_PRICE",
             )
         except BinanceAPIError as e:
             results["take_profit_error"] = str(e)
@@ -543,13 +559,13 @@ def set_position_stop_loss(
     cancel_existing_sl: bool = True,
 ) -> dict:
     """
-    Set or update Stop Loss (STOP_MARKET) for an EXISTING open position.
-    Can be used to move SL to breakeven or trail stop manually.
+    Set or update Stop Loss for an EXISTING open position.
+    Uses Binance Futures Algo Order API (/fapi/v1/algoOrder) with STOP_MARKET.
 
     Args:
         symbol: e.g. "SUIUSDT", "1000PEPEUSDT", "PHAUSDT"
         stop_price: trigger price for the stop loss
-        cancel_existing_sl: cancel existing STOP_MARKET orders for this symbol first (default True)
+        cancel_existing_sl: cancel existing STOP_MARKET algo orders first (default True)
     """
     with _client() as c:
         positions = c.get_position_risk(symbol)
@@ -561,52 +577,49 @@ def set_position_stop_loss(
 
     pos = open_pos[0]
     pos_amt = float(pos.get("positionAmt", 0))
+    pos_side = pos.get("positionSide", "BOTH")
     sl_side = "SELL" if pos_amt > 0 else "BUY"
 
     cancelled = []
     if cancel_existing_sl:
         with _client() as c:
-            open_orders = c.get_open_orders(symbol)
-            for o in open_orders:
-                if o.get("type") in ("STOP_MARKET", "STOP"):
-                    try:
-                        c.cancel_order(symbol, o["orderId"])
-                        cancelled.append(o["orderId"])
-                    except Exception as e:
-                        log.warning(f"Failed to cancel old SL {o['orderId']}: {e}")
+            try:
+                open_algos = c.get_open_algo_orders(symbol)
+                for o in open_algos:
+                    if o.get("orderType") in ("STOP_MARKET", "STOP"):
+                        try:
+                            c.cancel_algo_order(symbol, o["algoId"])
+                            cancelled.append(o["algoId"])
+                        except Exception as e:
+                            log.warning(f"Failed to cancel old SL algo {o['algoId']}: {e}")
+            except Exception as e:
+                log.warning(f"Could not list open algos: {e}")
 
     precision = get_symbol_precision(exchange_info, symbol)
     stop_price_r = round(stop_price, precision["price_precision"])
+    qty = abs(pos_amt)
 
-    log.info(f"Setting SL for {symbol} to {stop_price_r} (side={sl_side})")
+    log.info(f"Setting Algo SL for {symbol} to {stop_price_r} (side={sl_side}, qty={qty})")
 
     with _client() as c:
-        try:
-            order_res = c.place_order(
-                symbol=symbol,
-                side=sl_side,
-                type="STOP_MARKET",
-                stopPrice=stop_price_r,
-                closePosition=True,
-                timeInForce="GTC",
-            )
-        except BinanceAPIError as e:
-            log.warning(f"closePosition=True failed, trying reduceOnly: {e}")
-            order_res = c.place_order(
-                symbol=symbol,
-                side=sl_side,
-                type="STOP_MARKET",
-                stopPrice=stop_price_r,
-                quantity=abs(pos_amt),
-                reduceOnly=True,
-                timeInForce="GTC",
-            )
+        order_res = c.place_algo_order(
+            symbol=symbol,
+            side=sl_side,
+            type="STOP_MARKET",
+            algoType="CONDITIONAL",
+            triggerPrice=stop_price_r,
+            quantity=qty,
+            positionSide=pos_side,
+            reduceOnly=True,
+            workingType="CONTRACT_PRICE",
+        )
 
     return {
         "symbol": symbol,
         "action": "SET_STOP_LOSS",
         "new_stop_price": stop_price_r,
-        "position_side": "LONG" if pos_amt > 0 else "SHORT",
+        "quantity": qty,
+        "position_side": pos_side,
         "cancelled_previous_sl": cancelled,
         "order_result": order_res,
     }
@@ -623,7 +636,7 @@ def set_trailing_stop(
     cancel_existing_sl: bool = True,
 ) -> dict:
     """
-    Place a native Binance TRAILING_STOP_MARKET order on an EXISTING open position.
+    Place a native Binance TRAILING_STOP_MARKET algo order on an EXISTING open position.
     The stop price dynamically trails market price by `callback_rate` percent.
 
     Args:
@@ -632,7 +645,7 @@ def set_trailing_stop(
         activation_price: price level that must be reached before trailing activates (optional)
         quantity: manual quantity to trail (if None, derived from percentage)
         percentage: percentage of current position to protect with trailing stop (default 100.0)
-        cancel_existing_sl: cancel prior STOP_MARKET orders so stops don't conflict (default True)
+        cancel_existing_sl: cancel prior stop orders so stops don't conflict (default True)
     """
     import math
 
@@ -649,6 +662,7 @@ def set_trailing_stop(
 
     pos = open_pos[0]
     pos_amt = float(pos.get("positionAmt", 0))
+    pos_side = pos.get("positionSide", "BOTH")
     current_size = abs(pos_amt)
     side = "SELL" if pos_amt > 0 else "BUY"
 
@@ -667,31 +681,37 @@ def set_trailing_stop(
     cancelled = []
     if cancel_existing_sl:
         with _client() as c:
-            open_orders = c.get_open_orders(symbol)
-            for o in open_orders:
-                if o.get("type") in ("STOP_MARKET", "STOP", "TRAILING_STOP_MARKET"):
-                    try:
-                        c.cancel_order(symbol, o["orderId"])
-                        cancelled.append(o["orderId"])
-                    except Exception as e:
-                        log.warning(f"Failed to cancel old stop order {o['orderId']}: {e}")
+            try:
+                open_algos = c.get_open_algo_orders(symbol)
+                for o in open_algos:
+                    if o.get("orderType") in ("STOP_MARKET", "STOP", "TRAILING_STOP_MARKET"):
+                        try:
+                            c.cancel_algo_order(symbol, o["algoId"])
+                            cancelled.append(o["algoId"])
+                        except Exception as e:
+                            log.warning(f"Failed to cancel old stop algo {o['algoId']}: {e}")
+            except Exception as e:
+                log.warning(f"Could not list open algos: {e}")
 
     params = {
         "symbol": symbol,
         "side": side,
         "type": "TRAILING_STOP_MARKET",
+        "algoType": "CONDITIONAL",
         "quantity": order_qty,
         "callbackRate": round(callback_rate, 1),
+        "positionSide": pos_side,
         "reduceOnly": True,
+        "workingType": "CONTRACT_PRICE",
     }
 
     if activation_price is not None:
         params["activationPrice"] = round(activation_price, precision["price_precision"])
 
-    log.info(f"Placing Trailing Stop on {symbol}: qty={order_qty}, rate={callback_rate}%")
+    log.info(f"Placing Trailing Stop Algo on {symbol}: qty={order_qty}, rate={callback_rate}%")
 
     with _client() as c:
-        order_res = c.place_order(**params)
+        order_res = c.place_algo_order(**params)
 
     return {
         "symbol": symbol,
@@ -699,6 +719,7 @@ def set_trailing_stop(
         "callback_rate": callback_rate,
         "activation_price": activation_price,
         "quantity": order_qty,
+        "position_side": pos_side,
         "cancelled_previous_sl": cancelled,
         "order_result": order_res,
     }
@@ -737,6 +758,7 @@ def set_position_take_profit(
 
     pos = open_pos[0]
     pos_amt = float(pos.get("positionAmt", 0))
+    pos_side = pos.get("positionSide", "BOTH")
     current_size = abs(pos_amt)
     side = "SELL" if pos_amt > 0 else "BUY"
 
@@ -755,36 +777,43 @@ def set_position_take_profit(
     cancelled = []
     if cancel_existing_tp:
         with _client() as c:
-            open_orders = c.get_open_orders(symbol)
-            for o in open_orders:
-                if o.get("type") in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
-                    try:
-                        c.cancel_order(symbol, o["orderId"])
-                        cancelled.append(o["orderId"])
-                    except Exception as e:
-                        log.warning(f"Failed to cancel old TP order {o['orderId']}: {e}")
+            try:
+                open_algos = c.get_open_algo_orders(symbol)
+                for o in open_algos:
+                    if o.get("orderType") in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
+                        try:
+                            c.cancel_algo_order(symbol, o["algoId"])
+                            cancelled.append(o["algoId"])
+                        except Exception as e:
+                            log.warning(f"Failed to cancel old TP algo {o['algoId']}: {e}")
+            except Exception as e:
+                log.warning(f"Could not list open algos: {e}")
 
     tp_price_r = round(tp_price, precision["price_precision"])
 
-    params = {
-        "symbol": symbol,
-        "side": side,
-        "type": order_type,
-        "quantity": order_qty,
-        "reduceOnly": True,
-    }
-
-    if order_type == "LIMIT":
-        params["price"] = tp_price_r
-        params["timeInForce"] = "GTC"
-    else:
-        params["stopPrice"] = tp_price_r
-        params["timeInForce"] = "GTC"
-
-    log.info(f"Setting TP for {symbol}: qty={order_qty} at {tp_price_r}")
-
     with _client() as c:
-        order_res = c.place_order(**params)
+        if order_type == "LIMIT":
+            order_res = c.place_order(
+                symbol=symbol,
+                side=side,
+                type="LIMIT",
+                price=tp_price_r,
+                quantity=order_qty,
+                timeInForce="GTC",
+                reduceOnly=True,
+            )
+        else:
+            order_res = c.place_algo_order(
+                symbol=symbol,
+                side=side,
+                type="TAKE_PROFIT_MARKET",
+                algoType="CONDITIONAL",
+                triggerPrice=tp_price_r,
+                quantity=order_qty,
+                positionSide=pos_side,
+                reduceOnly=True,
+                workingType="CONTRACT_PRICE",
+            )
 
     return {
         "symbol": symbol,
@@ -809,9 +838,28 @@ def cancel_order(symbol: str, order_id: int) -> dict:
 @mcp.tool()
 @safe_tool
 def cancel_all_orders(symbol: str) -> dict:
-    """Cancel ALL open orders for a symbol (SL, TP, limit)."""
+    """Cancel ALL open standard orders AND conditional algo orders for a symbol."""
+    results = {}
     with _client() as c:
-        return c.cancel_all_orders(symbol)
+        try:
+            results["standard_orders"] = c.cancel_all_orders(symbol)
+        except Exception as e:
+            results["standard_orders_error"] = str(e)
+
+        cancelled_algos = []
+        try:
+            open_algos = c.get_open_algo_orders(symbol)
+            for o in open_algos:
+                try:
+                    c.cancel_algo_order(symbol, o["algoId"])
+                    cancelled_algos.append(o["algoId"])
+                except Exception as e:
+                    log.warning(f"Failed to cancel algo {o['algoId']}: {e}")
+            results["cancelled_algo_orders"] = cancelled_algos
+        except Exception as e:
+            results["algo_orders_error"] = str(e)
+
+    return {"symbol": symbol, "cancelled": results}
 
 
 @mcp.tool()
