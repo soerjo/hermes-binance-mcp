@@ -24,6 +24,7 @@ from client import BinanceClient, BinanceAPIError
 from analysis import analyze_symbol, calculate_sl_tp, score_opportunity
 from risk import (
     RiskError,
+    MAX_LEVERAGE,
     check_pre_trade,
     check_position_health,
     calculate_position_size,
@@ -328,8 +329,8 @@ def place_futures_order(
     """
     import math
 
-    if leverage > 10:
-        return {"error": "Max leverage is 10. Risk rule enforced."}
+    if leverage > MAX_LEVERAGE:
+        return {"error": f"Max leverage is {MAX_LEVERAGE}. Risk rule enforced."}
     if side not in ("LONG", "SHORT"):
         return {"error": "side must be LONG or SHORT"}
 
@@ -866,8 +867,8 @@ def cancel_all_orders(symbol: str) -> dict:
 @safe_tool
 def set_leverage(symbol: str, leverage: int) -> dict:
     """Set leverage for a symbol (max 10)."""
-    if leverage > 10:
-        return {"error": "Max leverage enforced: 10"}
+    if leverage > MAX_LEVERAGE:
+        return {"error": f"Max leverage enforced: {MAX_LEVERAGE}"}
     with _client() as c:
         return c.change_leverage(symbol, leverage)
 
