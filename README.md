@@ -103,9 +103,9 @@ mcp_servers:
 ### Tambah Skill ke Hermes
 
 ```bash
-mkdir -p ~/.hermes/skills/trading/binance-futures-bot
-cp skill/SKILL.md ~/.hermes/skills/trading/binance-futures-bot/
-cp -r skill/prompts ~/.hermes/skills/trading/binance-futures-bot/
+# Copy skill langsung sesuai struktur hierarki Hermes
+mkdir -p ~/.hermes/skills/trading/
+cp -r skills/trading/binance-futures-bot ~/.hermes/skills/trading/
 cp cron/binance_*.yaml ~/.hermes/cron/
 ```
 
