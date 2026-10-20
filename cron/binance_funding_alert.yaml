@@ -1,0 +1,18 @@
+name: binance_funding_alert
+description: Alert 5 minutes before Binance Futures funding time (08:00, 16:00, 00:00 UTC). Warn if paying significant funding on open positions.
+schedule: "55 7,15,23 * * *"
+platform: cli
+message: |
+  Cek funding rate untuk semua posisi terbuka sebelum funding time.
+  Gunakan skill binance-futures-bot dan ikuti workflow dari prompts/funding_alert.md.
+  
+  Langkah:
+  1. get_open_positions() — ambil posisi terbuka
+  2. Jika tidak ada posisi: selesai tanpa laporan
+  3. get_funding_rates(symbols) — cek rate untuk setiap posisi
+  4. Kalkulasi estimasi payment/receipt per posisi
+  5. Kirim alert ke Telegram jika total payment > $2 atau rate > 0.05%
+tags:
+  - trading
+  - binance
+  - funding

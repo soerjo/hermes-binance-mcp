@@ -1,0 +1,18 @@
+name: binance_morning_scan
+description: Binance Futures morning & evening market scan. Scan top USDT perps, run TA, auto-execute high-confidence signals.
+schedule: "0 0,12 * * *"
+platform: cli
+message: |
+  Jalankan Binance Futures morning scan sekarang.
+  Gunakan skill binance-futures-bot dan ikuti workflow dari prompts/morning_scan.md.
+  
+  Langkah:
+  1. get_account_status — cek balance dan kapasitas posisi
+  2. scan_market(top_n=15, interval="4h") — scan top 15 USDT perps
+  3. Evaluasi setiap peluang berdasarkan score
+  4. Auto-execute jika score >= 70 dan posisi terbuka < 3
+  5. Kirim laporan scan ke Telegram (platform: telegram)
+tags:
+  - trading
+  - binance
+  - autonomous

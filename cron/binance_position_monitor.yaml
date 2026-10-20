@@ -1,0 +1,19 @@
+name: binance_position_monitor
+description: Monitor open Binance Futures positions. Auto-close on CRITICAL loss, update trailing stop on profit.
+schedule: "*/30 * * * *"
+platform: cli
+message: |
+  Monitor posisi Binance Futures sekarang.
+  Gunakan skill binance-futures-bot dan ikuti workflow dari prompts/position_monitor.md.
+  
+  Langkah:
+  1. monitor_positions() — health check semua posisi terbuka
+  2. Jika tidak ada posisi terbuka: selesai tanpa laporan
+  3. CRITICAL (rugi > 3% margin): close_position(symbol) + alert Telegram 🔴
+  4. TRAIL_STOP (profit > 3%): update SL ke breakeven + lapor Telegram ✅
+  5. WARN: kirim notifikasi Telegram ⚠️ tanpa tindakan
+tags:
+  - trading
+  - binance
+  - monitoring
+  - autonomous
