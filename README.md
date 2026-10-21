@@ -49,8 +49,8 @@ binance-mcp container
 | Rule | Value |
 |---|---|
 | Max risk per trade | 2% of available balance |
-| Max open positions | 3 |
-| Max leverage | 10× (default 5×) |
+| Max open positions | 10 |
+| Max leverage | 50× (default 20×) |
 | Funding rate gate | Skip entry if \|rate\| > 0.1% |
 | Funding blackout | 30 min before/after each funding time |
 | Auto-execute threshold | confidence ≥ 70/100 |
