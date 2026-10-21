@@ -162,7 +162,7 @@ Semua rules ini dijalankan di `risk.py` secara otomatis. Hermes **tidak bisa** d
 |---|---|
 | Max risk per trade | 2% dari available balance |
 | Max posisi bersamaan | 10 |
-| Max leverage | 10x (default 5x) |
+| Max leverage | 50x (default 20x) |
 | Funding rate threshold | 0.1% — skip entry jika > ini |
 | Funding blackout | 30 menit sebelum/sesudah funding time |
 | Min confidence untuk auto-execute | 70/100 |
