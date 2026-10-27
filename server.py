@@ -41,7 +41,7 @@ log = logging.getLogger("binance-mcp")
 
 # ── Config from env ───────────────────────────────────────────────────────────
 SCAN_TOP_N      = int(os.getenv("SCAN_TOP_N", "15"))
-SCAN_INTERVAL   = os.getenv("SCAN_INTERVAL", "4h")
+SCAN_INTERVAL   = os.getenv("SCAN_INTERVAL", "15m")
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "5"))
 RISK_REWARD     = float(os.getenv("RISK_REWARD", "2.0"))
 MCP_TRANSPORT   = os.getenv("MCP_TRANSPORT", "stdio")
@@ -181,7 +181,7 @@ def scan_market(
 
 @mcp.tool()
 @safe_tool
-def analyze_market(symbol: str, interval: str = "4h") -> dict:
+def analyze_market(symbol: str, interval: str = "15m") -> dict:
     """
     Full technical analysis on a symbol: RSI, MACD, EMA, Bollinger, ATR, trend, signal.
 
