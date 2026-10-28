@@ -1,6 +1,6 @@
 # Binance Futures MCP Server with VPN Sidecar (Gluetun)
 #
-# Configured for OpenVPN custom config in ./vpn/client.ovpn
+# Configured for ProtonVPN OpenVPN custom config in ./vpn/client.ovpn
 # Uses DOT=off and plaintext 1.1.1.1 DNS to prevent CNAME resolution timeouts on AWS ALB.
 
 services:
@@ -19,6 +19,8 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
+    env_file:
+      - ./vpn/proton.env
     environment:
       - VPN_SERVICE_PROVIDER=custom
       - VPN_TYPE=openvpn
@@ -26,7 +28,7 @@ services:
       - DOT=off
       - DNS_PLAINTEXT_ADDRESS=1.1.1.1
     healthcheck:
-      test: ["CMD", "ping", "-c", "1", "1.1.1.1"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:9999"]
       interval: 30s
       timeout: 5s
       retries: 3

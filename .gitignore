@@ -10,3 +10,4 @@ vpn/client.ovpn
 vpn/*.key
 vpn/*.crt
 vpn/servers/
+vpn/*.env
