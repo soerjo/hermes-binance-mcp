@@ -43,6 +43,10 @@ binance-mcp container
 | `set_leverage` | Set leverage (max 10×) |
 | `monitor_positions` | Health check all positions, return actions needed |
 | `get_trade_history` | Recent realized income |
+| `get_spot_account_status` | Spot coin balances (free/locked) + estimated total value in USDT |
+| `get_spot_open_orders` | Active open spot orders |
+| `place_spot_order` | Place Spot BUY/SELL order (MARKET or LIMIT) |
+| `cancel_spot_order` | Cancel active Spot order by ID |
 
 ## Risk Rules
 

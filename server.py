@@ -297,6 +297,185 @@ def get_open_orders(symbol: Optional[str] = None) -> list:
     with _client() as c:
         return c.get_open_orders(symbol)
 
+
+@mcp.tool()
+@safe_tool
+def get_spot_account_status() -> dict:
+    """
+    Get current Binance Spot account status, non-zero coin balances,
+    and estimated total value in USDT.
+    """
+    with _client() as c:
+        account = c.get_spot_account(non_zero_only=True)
+        raw_balances = account.get("balances", [])
+
+        # Fetch tickers map for USDT conversion
+        try:
+            tickers = c.get_spot_ticker()
+            price_map = (
+                {t["symbol"]: float(t["price"]) for t in tickers if "symbol" in t and "price" in t}
+                if isinstance(tickers, list)
+                else {}
+            )
+        except Exception as e:
+            log.warning(f"Failed to fetch spot tickers for valuation: {e}")
+            price_map = {}
+
+    stablecoins = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD"}
+    formatted_balances = []
+    total_estimated_usdt = 0.0
+
+    for b in raw_balances:
+        asset = b.get("asset", "")
+        free = float(b.get("free", 0))
+        locked = float(b.get("locked", 0))
+        total_qty = free + locked
+        if total_qty <= 0:
+            continue
+
+        est_usdt = None
+        if asset in stablecoins:
+            est_usdt = total_qty
+        else:
+            pair = f"{asset}USDT"
+            if pair in price_map:
+                est_usdt = total_qty * price_map[pair]
+            elif f"{asset}BTC" in price_map and "BTCUSDT" in price_map:
+                est_usdt = total_qty * price_map[f"{asset}BTC"] * price_map["BTCUSDT"]
+
+        if est_usdt is not None:
+            total_estimated_usdt += est_usdt
+
+        formatted_balances.append({
+            "asset": asset,
+            "free": free,
+            "locked": locked,
+            "total": total_qty,
+            "estimated_usdt": round(est_usdt, 4) if est_usdt is not None else None,
+        })
+
+    # Sort balances by estimated USDT descending
+    formatted_balances.sort(
+        key=lambda x: x["estimated_usdt"] if x["estimated_usdt"] is not None else -1,
+        reverse=True,
+    )
+
+    return {
+        "account_type": account.get("accountType", "SPOT"),
+        "can_trade": account.get("canTrade", False),
+        "can_withdraw": account.get("canWithdraw", False),
+        "can_deposit": account.get("canDeposit", False),
+        "total_estimated_usdt": round(total_estimated_usdt, 2),
+        "balances_count": len(formatted_balances),
+        "balances": formatted_balances,
+    }
+
+
+@mcp.tool()
+@safe_tool
+def get_spot_open_orders(symbol: Optional[str] = None) -> list:
+    """
+    Get all open Spot orders.
+
+    Args:
+        symbol: optional filter by symbol e.g. "BTCUSDT"
+    """
+    with _client() as c:
+        raw_orders = c.get_spot_open_orders(symbol=symbol)
+
+    return [
+        {
+            "symbol": o.get("symbol"),
+            "order_id": o.get("orderId"),
+            "client_order_id": o.get("clientOrderId"),
+            "price": float(o.get("price", 0)),
+            "orig_qty": float(o.get("origQty", 0)),
+            "executed_qty": float(o.get("executedQty", 0)),
+            "status": o.get("status"),
+            "type": o.get("type"),
+            "side": o.get("side"),
+            "time_in_force": o.get("timeInForce"),
+            "time": o.get("time"),
+        }
+        for o in raw_orders
+        if isinstance(o, dict)
+    ]
+
+
+@mcp.tool()
+@safe_tool
+def place_spot_order(
+    symbol: str,
+    side: str,
+    order_type: str = "MARKET",
+    qty: Optional[float] = None,
+    quote_qty: Optional[float] = None,
+    price: Optional[float] = None,
+    time_in_force: Optional[str] = None,
+) -> dict:
+    """
+    Place a Binance Spot order (BUY or SELL).
+
+    Args:
+        symbol: e.g. "BTCUSDT"
+        side: "BUY" or "SELL"
+        order_type: "MARKET" or "LIMIT"
+        qty: base asset quantity (e.g. 0.01 BTC)
+        quote_qty: quote asset quantity for MARKET orders (e.g. 50 USDT)
+        price: limit order price
+        time_in_force: e.g. "GTC", "IOC", "FOK" (defaults to GTC for LIMIT)
+    """
+    side_upper = side.upper()
+    if side_upper not in ("BUY", "SELL"):
+        return {"error": "side must be BUY or SELL"}
+
+    type_upper = order_type.upper()
+    if type_upper not in ("MARKET", "LIMIT"):
+        return {"error": "order_type must be MARKET or LIMIT"}
+
+    if type_upper == "LIMIT" and price is None:
+        return {"error": "price is required for LIMIT orders"}
+
+    if qty is None and quote_qty is None:
+        return {"error": "Either qty or quote_qty must be specified"}
+
+    with _client() as c:
+        return c.create_spot_order(
+            symbol=symbol,
+            side=side_upper,
+            order_type=type_upper,
+            quantity=qty,
+            quote_order_qty=quote_qty,
+            price=price,
+            time_in_force=time_in_force,
+        )
+
+
+@mcp.tool()
+@safe_tool
+def cancel_spot_order(
+    symbol: str,
+    order_id: Optional[int] = None,
+    client_order_id: Optional[str] = None,
+) -> dict:
+    """
+    Cancel an active Binance Spot order by order_id or client_order_id.
+
+    Args:
+        symbol: e.g. "BTCUSDT"
+        order_id: Binance order ID
+        client_order_id: Client order ID string
+    """
+    if order_id is None and not client_order_id:
+        return {"error": "Either order_id or client_order_id must be provided"}
+
+    with _client() as c:
+        return c.cancel_spot_order(
+            symbol=symbol,
+            order_id=order_id,
+            orig_client_order_id=client_order_id,
+        )
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ORDER TOOLS
 # ═══════════════════════════════════════════════════════════════════════════════
