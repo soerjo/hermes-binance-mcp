@@ -16,6 +16,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 BASE_URL: str = "https://fapi.binance.com"
+SPOT_BASE_URL: str = "https://api.binance.com"
 RECV_WINDOW: int = 30000  # 30s to absorb VPN latency jitter
 
 
@@ -58,6 +59,15 @@ class BinanceClient:
         _proxy = os.environ.get("BINANCE_PROXY") or os.environ.get("HTTPS_PROXY") or None
         self._http = httpx.Client(
             base_url=BASE_URL,
+            timeout=15.0,
+            headers={
+                "X-MBX-APIKEY": self._api_key,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            proxy=_proxy,
+        )
+        self._spot_http = httpx.Client(
+            base_url=SPOT_BASE_URL,
             timeout=15.0,
             headers={
                 "X-MBX-APIKEY": self._api_key,
@@ -135,6 +145,57 @@ class BinanceClient:
         else:
             cleaned = _clean_params(params)
             resp = self._http.delete(path, params=cleaned)
+        return self._handle(resp)
+
+    def _spot_get(
+        self,
+        path: str,
+        params: Optional[dict[str, Any]] = None,
+        signed: bool = False,
+    ) -> Any:
+        params = params or {}
+        if signed:
+            full_query = self._sign(params)
+            url = f"{path}?{full_query}"
+            logger.debug("SPOT GET %s", url)
+            resp = self._spot_http.get(url)
+        else:
+            cleaned = _clean_params(params)
+            resp = self._spot_http.get(path, params=cleaned)
+        return self._handle(resp)
+
+    def _spot_post(
+        self,
+        path: str,
+        params: Optional[dict[str, Any]] = None,
+        signed: bool = False,
+    ) -> Any:
+        params = params or {}
+        if signed:
+            full_query = self._sign(params)
+            url = f"{path}?{full_query}"
+            logger.debug("SPOT POST %s", url)
+            resp = self._spot_http.post(url)
+        else:
+            cleaned = _clean_params(params)
+            resp = self._spot_http.post(path, data=cleaned)
+        return self._handle(resp)
+
+    def _spot_delete(
+        self,
+        path: str,
+        params: Optional[dict[str, Any]] = None,
+        signed: bool = False,
+    ) -> Any:
+        params = params or {}
+        if signed:
+            full_query = self._sign(params)
+            url = f"{path}?{full_query}"
+            logger.debug("SPOT DELETE %s", url)
+            resp = self._spot_http.delete(url)
+        else:
+            cleaned = _clean_params(params)
+            resp = self._spot_http.delete(path, params=cleaned)
         return self._handle(resp)
 
     @staticmethod
@@ -325,11 +386,104 @@ class BinanceClient:
         )
 
     # ------------------------------------------------------------------
+    # Spot Market & Account APIs
+    # ------------------------------------------------------------------
+
+    def get_spot_account(self, non_zero_only: bool = True) -> dict[str, Any]:
+        """
+        Fetch Binance Spot account information and balances.
+        GET /api/v3/account (HMAC signed)
+        """
+        data = self._spot_get("/api/v3/account", signed=True)
+        if non_zero_only and isinstance(data, dict) and "balances" in data:
+            data["balances"] = [
+                b
+                for b in data["balances"]
+                if float(b.get("free", 0)) > 0 or float(b.get("locked", 0)) > 0
+            ]
+        return data
+
+    def get_spot_open_orders(
+        self, symbol: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch all open orders on Binance Spot.
+        GET /api/v3/openOrders (HMAC signed)
+        """
+        params: dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol.upper()
+        return self._spot_get("/api/v3/openOrders", params=params, signed=True)
+
+    def get_spot_ticker(self, symbol: Optional[str] = None) -> Any:
+        """
+        Fetch latest Spot price ticker(s).
+        GET /api/v3/ticker/price (public)
+        """
+        params: dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol.upper()
+        return self._spot_get("/api/v3/ticker/price", params=params, signed=False)
+
+    def create_spot_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: Optional[float] = None,
+        quote_order_qty: Optional[float] = None,
+        price: Optional[float] = None,
+        time_in_force: Optional[str] = None,
+        new_client_order_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Create a new Spot order.
+        POST /api/v3/order (HMAC signed)
+        """
+        params: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "side": side.upper(),
+            "type": order_type.upper(),
+        }
+        if quantity is not None:
+            params["quantity"] = quantity
+        if quote_order_qty is not None:
+            params["quoteOrderQty"] = quote_order_qty
+        if price is not None:
+            params["price"] = price
+        if time_in_force is not None:
+            params["timeInForce"] = time_in_force
+        elif order_type.upper() == "LIMIT":
+            params["timeInForce"] = "GTC"
+        if new_client_order_id:
+            params["newClientOrderId"] = new_client_order_id
+
+        return self._spot_post("/api/v3/order", params=params, signed=True)
+
+    def cancel_spot_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Cancel an active Spot order.
+        DELETE /api/v3/order (HMAC signed)
+        """
+        params: dict[str, Any] = {"symbol": symbol.upper()}
+        if order_id is not None:
+            params["orderId"] = order_id
+        if orig_client_order_id:
+            params["origClientOrderId"] = orig_client_order_id
+        return self._spot_delete("/api/v3/order", params=params, signed=True)
+
+    # ------------------------------------------------------------------
     # Context manager & cleanup
     # ------------------------------------------------------------------
 
     def close(self) -> None:
         self._http.close()
+        self._spot_http.close()
 
     def __enter__(self) -> "BinanceClient":
         return self
