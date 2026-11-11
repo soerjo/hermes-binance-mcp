@@ -491,7 +491,7 @@ def place_futures_order(
     qty: Optional[float] = None,
     use_auto_sizing: bool = True,
     margin_type: str = "ISOLATED",
-    order_type: str = "MARKET",
+    order_type: str = "LIMIT",
     price: Optional[float] = None,
     time_in_force: str = "GTC",
 ) -> dict:
@@ -508,8 +508,9 @@ def place_futures_order(
         qty: manual quantity (only if use_auto_sizing=False)
         use_auto_sizing: size by 2% risk rule automatically
         margin_type: "ISOLATED" or "CROSSED"
-        order_type: "MARKET" (taker) or "LIMIT" (maker fee — preferred for entries)
-        price: limit order price (required for LIMIT; sizing/SL/TP use this price)
+        order_type: "LIMIT" (default — maker fee) or "MARKET" (taker, explicit only)
+        price: limit order price. If omitted for LIMIT, a maker-safe price is
+               auto-picked from the order book (best bid for LONG, best ask for SHORT)
         time_in_force: "GTC" (default), "IOC", "FOK" — only for LIMIT
     """
     import math
@@ -522,8 +523,16 @@ def place_futures_order(
     type_upper = order_type.upper()
     if type_upper not in ("MARKET", "LIMIT"):
         return {"error": "order_type must be MARKET or LIMIT"}
+    auto_priced = False
     if type_upper == "LIMIT" and price is None:
-        return {"error": "price is required for LIMIT orders"}
+        # Standing rule: entries MUST be LIMIT (maker). No price given -> post
+        # maker-safe at the book: LONG joins the best bid, SHORT the best ask.
+        with _client() as c:
+            bt = c.get_book_ticker(symbol)
+        price = float(bt["bidPrice"]) if side == "LONG" else float(bt["askPrice"])
+        auto_priced = True
+        if price <= 0:
+            return {"error": f"Order book returned no usable price for {symbol}"}
 
     with _client() as c:
         account       = c.get_account()
@@ -663,6 +672,7 @@ def place_futures_order(
     results["summary"] = {
         "symbol": symbol, "side": side, "qty": order_qty,
         "order_type": type_upper, "entry_price": entry_price,
+        "auto_priced": auto_priced,
         "entry_price_approx": mark_price, "sl": sl_price_r,
         "tp": tp_price_r, "leverage": leverage,
         "risk_usdt": round(free_balance * 0.02, 2),
