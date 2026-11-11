@@ -804,6 +804,18 @@ export function createServer(): McpServer {
           .string()
           .default("LIMIT")
           .describe('"LIMIT" (default — maker fee) or "MARKET" (taker, explicit only)'),
+        max_risk_usdt: z
+          .number()
+          .optional()
+          .describe("hard risk cap in USDT: order rejected if final qty × SL distance × fees exceeds it"),
+        reference_price: z
+          .number()
+          .optional()
+          .describe("analysis-time reference price; order rejected if the book drifted beyond tolerance"),
+        price_tolerance_pct: z
+          .number()
+          .default(0.5)
+          .describe("max allowed |entry - reference_price| as % of reference (default 0.5)"),
         price: z
           .number()
           .optional()
@@ -977,6 +989,34 @@ export function createServer(): McpServer {
             return {
               error:
                 `Invalid SL/TP geometry for ${symbol} (SHORT): need TP(${tpPriceR}) < entry(${entryPrice}) < SL(${slPriceR})`,
+            };
+          }
+        }
+
+        // Drift guard: the caller sized against a reference price. If the book
+        // has moved beyond tolerance, the approved sizing no longer describes
+        // this order — reject BEFORE any POST.
+        if (args.reference_price !== undefined && args.reference_price > 0) {
+          const tolerance = Math.max(0, args.price_tolerance_pct ?? 0.5) / 100;
+          const drift = Math.abs(entryPrice - args.reference_price) / args.reference_price;
+          if (drift > tolerance) {
+            return {
+              error: `Entry drifted ${(drift * 100).toFixed(2)}% from reference $${args.reference_price} (tolerance ${((tolerance) * 100).toFixed(2)}%) — re-analyze before ordering`,
+              blocked: true,
+            };
+          }
+        }
+
+        // Final risk guard on the qty that will actually be POSTed, using the
+        // real entry price and both taker fees. This is the last line of
+        // defence so the approved sizing matches the placed order.
+        if (args.max_risk_usdt !== undefined && args.max_risk_usdt > 0) {
+          const stopDistanceFinal = Math.abs(entryPrice - slPriceR) / entryPrice;
+          const finalRisk = orderQty * entryPrice * stopDistanceFinal * (1 + 2 * 0.0005);
+          if (finalRisk > args.max_risk_usdt + 1e-6) {
+            return {
+              error: `Final stop risk $${finalRisk.toFixed(2)} exceeds cap $${args.max_risk_usdt.toFixed(2)} (qty=${orderQty}, entry=${entryPrice}, SL=${slPriceR})`,
+              blocked: true,
             };
           }
         }

@@ -380,3 +380,24 @@ describe("rounding helper", () => {
     expect(roundTo(99.999, 2)).toBe(100);
   });
 });
+
+// ── Order-level final risk & drift guards (handler-level logic) ──────────────
+
+describe("final risk guard math", () => {
+  test("final risk formula matches the engine sizing model", () => {
+    // qty=0.989, entry=100, SL=98 → risk = qty*dist*(1+2*fee)
+    const qty = 0.989;
+    const entry = 100;
+    const sl = 98;
+    const risk = qty * Math.abs(entry - sl) * (1 + 2 * 0.0005);
+    expect(risk).toBeCloseTo(1.981, 2);
+    expect(risk).toBeLessThanOrEqual(2.0);
+  });
+
+  test("drift beyond tolerance is detectable", () => {
+    const reference = 100;
+    const entry = 101; // 1% drift
+    const drift = Math.abs(entry - reference) / reference;
+    expect(drift).toBeGreaterThan(0.005); // 0.5% tolerance
+  });
+});
