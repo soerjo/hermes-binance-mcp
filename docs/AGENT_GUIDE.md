@@ -28,13 +28,16 @@
 | `RISK_REWARD` | `2.0` | Risk:Reward default untuk SL/TP |
 | `MAX_OPEN_POSITIONS` | `5` | Batas posisi terbuka (risk engine) |
 | `MAX_RISK_PER_TRADE_PCT` | `0.02` | Risiko per trade (2%) |
+| `ENTRY_FILL_TIMEOUT_S` | `30` | Batas tunggu fill LIMIT sebelum sisa entry di-cancel |
+| `ENTRY_FILL_POLL_MS` | `750` | Interval polling status entry saat menunggu fill |
+| `MARKET_FILL_WAIT_S` | `5` | Batas tunggu konfirmasi fill untuk order MARKET |
 | `LOG_LEVEL` | `INFO` | Level log |
 
 ## 3. Aturan Wajib untuk Agent (Safety Rules)
 
 1. **Selalu cek kapasitas dulu**: Panggil `get_account_status` sebelum membuka posisi baru. `open_positions_count` tidak boleh melebihi `MAX_OPEN_POSITIONS` (default 5).
 2. **Jangan buka posisi kalau balance rendah**: `available_balance` < $20 → jangan buka order.
-3. **Gunakan `use_auto_sizing: true`** untuk sizing otomatis (2% risk rule). Jika manual, pastikan `qty` atau `notional_usdt` valid.
+3. **Sizing default adalah risk rule, bukan notional tetap**: tanpa flag, `use_auto_sizing=true` menghitung qty dari 2% risk rule. Untuk notional tetap (prosedur standing), kirim `use_auto_sizing=false` + `notional_usdt` eksplisit. Jika `notional_usdt` dikirim bersama `use_auto_sizing=true`, notional yang menang (ada `sizing_note` di output).
 4. **SL/TP wajib valid geometri**:
    - LONG: `sl < entry < tp`
    - SHORT: `tp < entry < sl`
@@ -43,7 +46,7 @@
 6. **Funding rate**: Hindari entry saat `|funding_rate| >= 0.001` (0.1%) atau dalam blackout window (30 menit sebelum funding).
 7. **Confidence minimum**: Sinyal dengan confidence < `MIN_CONFIDENCE` (60) sebaiknya tidak dieksekusi.
 8. **Selalu monitor posisi**: Panggil `monitor_positions` secara berkala (setiap 30 menit) untuk mendeteksi CRITICAL/WARN.
-9. **Jangan retry order setelah POST diterima**: Jika response timeout, cek `get_open_orders` / `get_open_positions` dulu sebelum re-send (hindari order ganda).
+9. **Idempotensi**: selalu sertakan `client_order_id` (unik per rencana entry) saat memanggil `place_futures_order`. Jika call diulang karena retry/gangguan dengan key yang sama, server akan lookup dulu dan menolak duplikasi (`status: DUPLICATE_SUPPRESSED`). Tanpa key: jangan retry setelah POST — cek `get_open_orders` / `get_open_positions` dulu.
 10. **Auto-entry engine adalah domain `crypto-trading-engine`, bukan tool MCP ini.** Untuk menyalakan/mematikan entry otomatis, Agent harus menjalankan CLI engine (lihat `SKILL.md` / `docs/AGENT_GUIDE.md` di repo engine), bukan memanggil `place_futures_order` sendiri berulang-ulang. Default switch: **OFF (manual-only)**; `auto-entry on` HANYA atas permintaan eksplisit pengguna.
 
 ## 4. Daftar Tool (26) & Cara Pakai
@@ -73,7 +76,9 @@
 
 | Tool | Args | Output Utama |
 | :--- | :--- | :--- |
-| `place_futures_order` | `symbol`, `side` (LONG/SHORT), `leverage` (default 5), `sl_price`, `tp_price`, `qty`, `notional_usdt`, `use_auto_sizing` (default true), `margin_type` (default ISOLATED), `order_type` (default LIMIT), `price`, `time_in_force` (default GTC) | `entry`, `stop_loss`, `take_profit`, `summary{}` |
+| `place_futures_order` | `symbol`, `side` (LONG/SHORT), `leverage` (default 5), `sl_price`, `tp_price`, `qty`, `notional_usdt`, `use_auto_sizing` (default true = 2% risk), `margin_type` (default ISOLATED), `order_type` (default LIMIT), `price`, `time_in_force` (default GTC), `client_order_id`, `wait_for_fill` (default true), `entry_fill_timeout_s` (default 30), `close_on_sl_failure` (default true) | `status`, `entry`, `stop_loss`, `take_profit`, `summary{}` |
+
+Status `place_futures_order`: `FILLED_PROTECTED` (entry fill + SL & TP armed), `FILLED_SL_ONLY_TP_FAILED`, `PROTECTION_FAILED_POSITION_CLOSED` (fail-safe close), `PROTECTION_FAILED_CLOSE_FAILED` / `PROTECTION_FAILED_POSITION_OPEN` (posisi tanpa SL — aksi manual SEGERA), `ENTRY_CANCELLED_NOT_FILLED`, `ENTRY_REJECTED`, `ENTRY_PENDING_PROTECTION_DEFERRED` (`wait_for_fill=false`), `DUPLICATE_SUPPRESSED`, `POSITION_FLAT_AFTER_FILL`. SL selalu dipasang SEBELUM TP, dan hanya setelah posisi benar-benar terbentuk (menghindari error -4509).
 | `close_position` | `symbol` | `close_result`, `cancelled_orders`, `cancelled_algo_orders` |
 | `partial_close_position` | `symbol`, `percentage` (default 50), `qty`, `order_type` (default MARKET), `price` | `closed_qty`, `remaining_size_approx`, `order_result` |
 | `set_position_stop_loss` | `symbol`, `stop_price`, `cancel_existing_sl` (default true) | `new_stop_price`, `quantity`, `cancelled_previous_sl` |

@@ -63,6 +63,11 @@ export const config = {
   exchangeInfoTtl: envInt("EXCHANGE_INFO_TTL", 3600),
   recvWindow: envInt("RECV_WINDOW", 30000),
 
+  // Entry fill wait (place_futures_order protects only AFTER the entry fills)
+  entryFillTimeoutS: envInt("ENTRY_FILL_TIMEOUT_S", 30),
+  entryFillPollMs: envInt("ENTRY_FILL_POLL_MS", 750),
+  marketFillWaitS: envInt("MARKET_FILL_WAIT_S", 5),
+
   // WebSocket mark-price cache
   wsEnabled: envStr("BINANCE_WS_ENABLED", "1") !== "0",
   wsUrl: envStr("BINANCE_WS_URL", "wss://fstream.binance.com/ws/!markPrice@arr@1s"),

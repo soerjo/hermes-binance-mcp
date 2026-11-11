@@ -331,6 +331,18 @@ class BinanceClient {
     return this.request("/fapi/v1/order", { method: "POST", signed: true, params });
   }
 
+  /** Query a single futures order by orderId or origClientOrderId. */
+  getOrder(
+    symbol: string,
+    params: { orderId?: number; origClientOrderId?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.request("/fapi/v1/order", {
+      method: "GET",
+      signed: true,
+      params: { symbol, ...params },
+    });
+  }
+
   cancelOrder(symbol: string, orderId: number): Promise<Record<string, unknown>> {
     return this.request("/fapi/v1/order", {
       method: "DELETE",

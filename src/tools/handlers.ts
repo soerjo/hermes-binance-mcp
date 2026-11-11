@@ -35,6 +35,17 @@ import {
   roundTickPrice,
 } from "../risk/engine";
 import { getSymbolPrecision } from "../risk/precision";
+import {
+  ACTIVE_STATUSES,
+  computeFinalRiskUsd,
+  isFilledStatus,
+  isTerminalOrderStatus,
+  lookupFuturesOrder,
+  normalizeOrderStatus,
+  sanitizeClientOrderId,
+  sleep,
+  waitForTerminalStatus,
+} from "./order-flow";
 
 const log = createLogger("tools");
 
@@ -826,6 +837,28 @@ export function createServer(): McpServer {
           .string()
           .default("GTC")
           .describe('"GTC" (default), "IOC", "FOK" — only for LIMIT'),
+        client_order_id: z
+          .string()
+          .optional()
+          .describe(
+            "idempotency key (newClientOrderId). Re-sending with the same key will NOT duplicate the order — the existing entry is looked up first",
+          ),
+        wait_for_fill: z
+          .boolean()
+          .default(true)
+          .describe(
+            "wait until the entry fills before arming SL/TP (recommended). false returns immediately with ENTRY_PENDING — you must arm SL/TP yourself once filled",
+          ),
+        entry_fill_timeout_s: z
+          .number()
+          .optional()
+          .describe("max seconds to wait for a LIMIT fill before the remainder is cancelled (default 30)"),
+        close_on_sl_failure: z
+          .boolean()
+          .default(true)
+          .describe(
+            "fail-safe: if the SL algo order cannot be placed after retries, market-close the position instead of leaving it unprotected",
+          ),
       },
     },
     async (args) =>
@@ -925,8 +958,13 @@ export function createServer(): McpServer {
           throw error;
         }
 
+        let sizingNote: string | undefined;
         let orderQty: number;
         if (args.notional_usdt !== undefined && args.notional_usdt > 0) {
+          if (args.use_auto_sizing) {
+            sizingNote = "notional_usdt took precedence over use_auto_sizing";
+            log.warn(`${symbol}: notional_usdt provided with use_auto_sizing=true — sizing by notional`);
+          }
           orderQty = roundStepQty(
             args.notional_usdt / entryPrice,
             precision.qty_step,
@@ -1025,10 +1063,39 @@ export function createServer(): McpServer {
           `Placing ${side} ${symbol}: ${typeUpper} qty=${orderQty} @ ${entryPrice} SL=${slPriceR} TP=${tpPriceR} ${leverage}x`,
         );
 
-        const protect =
-          typeUpper === "LIMIT"
-            ? { closePosition: true }
-            : { quantity: orderQty, reduceOnly: true };
+        // ── Idempotency: never POST twice with the same client_order_id ──
+        const clientOrderId = sanitizeClientOrderId(args.client_order_id);
+        if (clientOrderId) {
+          const existing = await lookupFuturesOrder(client, symbol, {
+            origClientOrderId: clientOrderId,
+          });
+          const existingStatus = normalizeOrderStatus(existing);
+          if (existing && (ACTIVE_STATUSES.has(existingStatus) || existingStatus === "FILLED")) {
+            const posList0 = await client.getPositionRisk(symbol);
+            const posAmt0 = num(posList0.find((p) => p.symbol === symbol)?.positionAmt);
+            return {
+              status: "DUPLICATE_SUPPRESSED",
+              duplicate: true,
+              client_order_id: clientOrderId,
+              existing_entry: existing,
+              existing_entry_status: existingStatus,
+              open_position_qty: posAmt0,
+              note:
+                posAmt0 !== 0
+                  ? "Entry already exists (or has filled). If SL/TP are not armed yet, set them via set_position_stop_loss / set_position_take_profit."
+                  : "An active order with this client_order_id already exists — nothing was re-sent.",
+            };
+          }
+          if (existing) {
+            log.info(
+              `${symbol}: client_order_id ${clientOrderId} previously used (${existingStatus}) — placing fresh order`,
+            );
+          }
+        }
+
+        log.info(
+          `Placing ${side} ${symbol}: ${typeUpper} qty=${orderQty} @ ${entryPrice} SL=${slPriceR} TP=${tpPriceR} ${leverage}x`,
+        );
 
         const results: Record<string, unknown> = {};
 
@@ -1045,72 +1112,226 @@ export function createServer(): McpServer {
           else throw error;
         }
 
+        // ── Entry POST, with outcome recovery via client_order_id lookup ──
+        const entryParams: Record<string, string | number | boolean> = {
+          symbol,
+          side: orderSide,
+          type: typeUpper,
+          quantity: orderQty,
+          reduceOnly: false,
+        };
         if (typeUpper === "LIMIT") {
-          results.entry = await client.placeOrder({
+          entryParams.price = entryPrice;
+          entryParams.timeInForce = args.time_in_force.toUpperCase();
+        }
+        if (clientOrderId) entryParams.newClientOrderId = clientOrderId;
+
+        let entryOrder: Record<string, unknown> | null = null;
+        try {
+          entryOrder = (await client.placeOrder(entryParams)) as Record<string, unknown>;
+        } catch (error) {
+          const submitError = error instanceof Error ? error.message : String(error);
+          log.error(`Entry POST failed ${symbol}: ${submitError}`);
+          if (clientOrderId) {
+            // The POST outcome is unknown (timeout/network). Look the order up
+            // instead of blindly re-sending — that is what prevents doubles.
+            const known = await lookupFuturesOrder(client, symbol, {
+              origClientOrderId: clientOrderId,
+            });
+            if (known) {
+              entryOrder = known;
+              results.outcome_note =
+                "Entry response was lost, but the order was recovered via client_order_id lookup — it was NOT re-sent.";
+            }
+          }
+          if (!entryOrder) {
+            return {
+              error: `Entry order failed: ${submitError}`,
+              post_outcome: "NOT_PLACED_OR_UNKNOWN",
+              client_order_id: clientOrderId ?? null,
+              note: "No entry was confirmed. If you retry, reuse the same client_order_id (it is checked against open/filled orders first).",
+            };
+          }
+        }
+        results.entry = entryOrder;
+
+        // ── Wait for the entry to reach a terminal state, then reconcile ──
+        const orderId = intOf(entryOrder.orderId);
+        const canTrack = orderId > 0;
+        const isMarket = typeUpper === "MARKET";
+        const waitFill = args.wait_for_fill !== false;
+        const status0 = normalizeOrderStatus(entryOrder);
+
+        if (waitFill && canTrack && !isTerminalOrderStatus(status0)) {
+          const waitS = isMarket
+            ? config.marketFillWaitS
+            : (args.entry_fill_timeout_s ?? config.entryFillTimeoutS);
+          const finalOrder = await waitForTerminalStatus(
+            client,
             symbol,
-            side: orderSide,
-            type: "LIMIT",
-            quantity: orderQty,
-            price: entryPrice,
-            timeInForce: args.time_in_force.toUpperCase(),
-            reduceOnly: false,
-          });
-        } else {
-          results.entry = await client.placeOrder({
-            symbol,
-            side: orderSide,
-            type: "MARKET",
-            quantity: orderQty,
-            reduceOnly: false,
-          });
+            orderId,
+            Date.now() + waitS * 1000,
+          );
+          if (finalOrder) entryOrder = finalOrder;
+          results.entry = entryOrder;
+        }
+        const entryStatus = normalizeOrderStatus(entryOrder);
+
+        let posAmt = num(
+          (await client.getPositionRisk(symbol)).find((p) => p.symbol === symbol)?.positionAmt,
+        );
+
+        if (posAmt === 0) {
+          if (isFilledStatus(entryStatus)) {
+            results.status = "POSITION_FLAT_AFTER_FILL";
+            results.error =
+              "Entry reported FILLED but no position exists — it may have been closed by another process. Verify manually before re-ordering.";
+            return results;
+          }
+          if (isTerminalOrderStatus(entryStatus) && entryStatus !== "FILLED") {
+            results.status = "ENTRY_REJECTED";
+            results.error = `Entry order did not fill: ${entryStatus}`;
+            return results;
+          }
+          if (!waitFill) {
+            results.status = "ENTRY_PENDING_PROTECTION_DEFERRED";
+            results.note =
+              "wait_for_fill=false: entry is on the book but NOT protected. Poll get_open_positions, then arm SL (first!) and TP via set_position_stop_loss / set_position_take_profit.";
+            return results;
+          }
+          // Still open at the deadline → cancel the remainder. A fill may race
+          // the cancel, so re-check the position afterwards instead of trusting
+          // the cancel result.
+          if (canTrack) {
+            try {
+              await client.cancelOrder(symbol, orderId);
+            } catch (error) {
+              log.warn(
+                `Cancel on timeout failed ${symbol} #${orderId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            await sleep(500);
+            posAmt = num(
+              (await client.getPositionRisk(symbol)).find((p) => p.symbol === symbol)?.positionAmt,
+            );
+          }
+          if (posAmt === 0) {
+            results.status = "ENTRY_CANCELLED_NOT_FILLED";
+            results.note =
+              "LIMIT entry did not fill within the timeout; the remainder was cancelled. No position, no SL/TP placed.";
+            return results;
+          }
+          results.entry_cancel_note =
+            "Entry (partially) filled while/just before the timeout cancel — protecting the actual open position.";
         }
 
-        try {
-          results.stop_loss = await client.placeAlgoOrder({
-            symbol,
-            side: slSide,
-            type: "STOP_MARKET",
-            algoType: "CONDITIONAL",
-            triggerPrice: slPriceR,
-            positionSide: "BOTH",
-            workingType: "CONTRACT_PRICE",
-            ...protect,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          results.stop_loss_error = message;
-          log.error(`SL failed ${symbol}: ${message}`);
+        // ── Protection: SL FIRST, then TP. closePosition:true covers partial fills. ──
+        const protectQty = Math.abs(posAmt);
+        const actualEntry = num(entryOrder.avgPrice) || entryPrice;
+        if (actualEntry !== entryPrice) {
+          results.entry_price_note = `Fill price ${actualEntry} differs from planned ${entryPrice}`;
+        }
+        if ((side === "LONG" && actualEntry <= slPriceR) || (side === "SHORT" && actualEntry >= slPriceR)) {
+          results.slippage_warning =
+            `Filled at ${actualEntry}, at/beyond the planned SL ${slPriceR} — the SL algo may trigger immediately or be rejected.`;
         }
 
-        try {
-          results.take_profit = await client.placeAlgoOrder({
-            symbol,
-            side: tpSide,
-            type: "TAKE_PROFIT_MARKET",
-            algoType: "CONDITIONAL",
-            triggerPrice: tpPriceR,
-            positionSide: "BOTH",
-            workingType: "CONTRACT_PRICE",
-            ...protect,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          results.take_profit_error = message;
-          log.error(`TP failed ${symbol}: ${message}`);
+        const protect = { closePosition: true };
+        let slResult: Record<string, unknown> | null = null;
+        let slError: string | null = null;
+        for (let attempt = 0; attempt < 2 && !slResult; attempt++) {
+          try {
+            slResult = (await client.placeAlgoOrder({
+              symbol,
+              side: slSide,
+              type: "STOP_MARKET",
+              algoType: "CONDITIONAL",
+              triggerPrice: slPriceR,
+              positionSide: "BOTH",
+              workingType: "CONTRACT_PRICE",
+              ...protect,
+            })) as Record<string, unknown>;
+          } catch (error) {
+            slError = error instanceof Error ? error.message : String(error);
+            log.error(`SL failed ${symbol} (attempt ${attempt + 1}): ${slError}`);
+            if (attempt === 0) await sleep(500);
+          }
         }
+        if (slResult) results.stop_loss = slResult;
+        else results.stop_loss_error = slError;
+
+        if (!slResult) {
+          // Fail-safe: a naked position is the worst outcome, never leave one.
+          if (args.close_on_sl_failure !== false) {
+            try {
+              results.emergency_close = await client.placeOrder({
+                symbol,
+                side: posAmt > 0 ? "SELL" : "BUY",
+                type: "MARKET",
+                quantity: protectQty,
+                reduceOnly: true,
+              });
+              results.status = "PROTECTION_FAILED_POSITION_CLOSED";
+              results.error = `SL could not be placed (${slError}); the position was market-closed as fail-safe.`;
+            } catch (error) {
+              const closeError = error instanceof Error ? error.message : String(error);
+              results.status = "PROTECTION_FAILED_CLOSE_FAILED";
+              results.error = `SL failed (${slError}) AND emergency close failed (${closeError}). POSITION IS UNPROTECTED.`;
+              results.action_required = "CLOSE_OR_PROTECT_POSITION_NOW";
+            }
+          } else {
+            results.status = "PROTECTION_FAILED_POSITION_OPEN";
+            results.error = `SL could not be placed (${slError}); position left open (close_on_sl_failure=false).`;
+            results.action_required = "SET_SL_MANUALLY_NOW";
+          }
+          return results;
+        }
+
+        let tpResult: Record<string, unknown> | null = null;
+        let tpError: string | null = null;
+        for (let attempt = 0; attempt < 2 && !tpResult; attempt++) {
+          try {
+            tpResult = (await client.placeAlgoOrder({
+              symbol,
+              side: tpSide,
+              type: "TAKE_PROFIT_MARKET",
+              algoType: "CONDITIONAL",
+              triggerPrice: tpPriceR,
+              positionSide: "BOTH",
+              workingType: "CONTRACT_PRICE",
+              ...protect,
+            })) as Record<string, unknown>;
+          } catch (error) {
+            tpError = error instanceof Error ? error.message : String(error);
+            log.error(`TP failed ${symbol} (attempt ${attempt + 1}): ${tpError}`);
+            if (attempt === 0) await sleep(500);
+          }
+        }
+        if (tpResult) results.take_profit = tpResult;
+        else {
+          results.take_profit_error = tpError;
+          results.status = "FILLED_SL_ONLY_TP_FAILED";
+          results.error = `TP could not be placed (${tpError}). SL is armed; the position runs without TP.`;
+          results.action_required = "SET_TP_MANUALLY";
+        }
+        if (!results.status) results.status = "FILLED_PROTECTED";
 
         results.summary = {
           symbol,
           side,
-          qty: orderQty,
+          qty: protectQty,
+          order_qty: orderQty,
           order_type: typeUpper,
-          entry_price: entryPrice,
+          entry_price: actualEntry,
+          planned_entry_price: entryPrice,
           auto_priced: autoPriced,
           entry_price_approx: markPrice,
           sl: slPriceR,
           tp: tpPriceR,
           leverage,
-          risk_usdt: roundTo(freeBalance * 0.02, 2),
+          risk_usdt: roundTo(computeFinalRiskUsd(protectQty, actualEntry, slPriceR), 2),
+          ...(sizingNote ? { sizing_note: sizingNote } : {}),
+          ...(clientOrderId ? { client_order_id: clientOrderId } : {}),
         };
         return results;
       }),

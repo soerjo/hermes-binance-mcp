@@ -37,7 +37,7 @@ Skill ini mendefinisikan workflow, aturan, dan perilaku Hermes.
 | `get_account_status` | Balance, margin, open position count |
 | `get_open_positions` | All open positions with health status |
 | `get_open_orders` | Pending SL/TP/limit orders |
-| `place_futures_order` | Open LONG/SHORT; opsional `max_risk_usdt`/`reference_price` guard |
+| `place_futures_order` | Open LONG/SHORT — default sizing = 2% risk rule (kirim `use_auto_sizing=false` + `notional_usdt` untuk notional tetap). SL/TP di-arm SETELAH entry fill; `client_order_id` untuk idempotensi |
 | `close_position` | Market-close 100% + cancel its orders |
 | `partial_close_position` | Close partial amount (e.g. 50%) of active position |
 | `set_position_stop_loss` | Set or update SL (STOP_MARKET) on active position |

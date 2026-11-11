@@ -41,7 +41,7 @@ binance-mcp (Bun)
 | `get_account_status` | Balance, margin, open position count |
 | `get_open_positions` | All positions with health status (OK/WARN/CRITICAL) |
 | `get_open_orders` | Pending SL/TP/limit orders |
-| `place_futures_order` | Open LONG/SHORT — auto sizing, auto SL/TP via ATR; opsional `max_risk_usdt`/`reference_price` guard |
+| `place_futures_order` | Open LONG/SHORT — default sizing = 2% risk rule (kirim `use_auto_sizing=false` + `notional_usdt` untuk notional tetap). SL/TP di-arm SETELAH entry fill; `client_order_id` untuk idempotensi |
 | `close_position` | Market-close 100% of position + cancel its orders |
 | `partial_close_position` | Close partial (e.g. 50%) of active position (MARKET or LIMIT) |
 | `set_position_stop_loss` | Set or update SL (STOP_MARKET) on an active position |
