@@ -54,7 +54,8 @@
 | `get_futures_market` | `symbol`, `interval` (default 4h), `limit` (default 200) | `klines`, `ticker_24h`, `mark_price`, `book_ticker` |
 | `scan_market` | `top_n` (default 15), `interval` (default 15m), `min_volume_usdt` (default 50M) | `scanned`, `actionable`, `top_opportunities[]`, `ranked_actionable[]` (max 5) |
 | `analyze_market` | `symbol`, `interval` (default 15m) | `mark_price`, `funding_rate`, `analysis` (RSI, MACD, EMA, BB, ATR, ADX, trend, signal, confidence), `score`, `suggested_sl_tp` |
-| `analyze_mtf` | `symbol` | `mark_price`, `funding_rate`, `timeframes` (4h/1h/15m/5m masing-masing analysis lengkap) — **gunakan ini untuk efisiensi** |
+| `analyze_mtf` | `symbol`, `intervals` (opsional) | `mark_price`, `funding_rate`, `timeframes` — **gunakan ini untuk efisiensi**. `intervals` default 4h/1h/15m/5m, bisa custom (e.g. ["1d","4h","1h","15m"] untuk swing) |
+| `recommend_trading_style` | (none) | Analisa BTC/ETH/SOL 1d/4h/1h/15m → rekomendasi swing/intraday/scalp/wait + BTC bias + veto + suggested targets |
 | `get_funding_rates` | `symbols` (opsional, array) | Array mark price + funding rate, diurutkan by abs rate (top 20 jika tanpa symbols) |
 
 ### Account & Positions
@@ -167,7 +168,8 @@ Gluetun VPN sidecar: gunakan `docker-compose.vpn.yml` jika perlu proxy. DoH auto
 - **`set_position_stop_loss`**: `stop_price` trigger, `cancel_existing_sl` default true.
 - **`set_position_take_profit`**: `tp_price`, `percentage` default 50, `order_type` default "TAKE_PROFIT_MARKET", `cancel_existing_tp` default false.
 - **`set_trailing_stop`**: `callback_rate` 0.1-5.0, `activation_price` opsional.
-- **`analyze_mtf`**: hanya `symbol` — kembalikan 4h/1h/15m/5m sekaligus.
+- **`analyze_mtf`**: `symbol`, `intervals` (opsional) — kembalikan timeframe yang diminta (default 4h/1h/15m/5m).
+- **`recommend_trading_style`**: tanpa argumen — kembalikan rezim pasar, skor per mode, BTC bias, veto, dan suggested targets.
 - **`scan_market`**: `top_n` default 15, `interval` default "15m", `min_volume_usdt` default 50M.
 
 ---
