@@ -20,10 +20,35 @@ metadata:
 Hermes operates as a **full-auto futures trading bot** for Mas's Binance account.
 This skill defines all workflows, rules, and behaviors Hermes must follow.
 
-## Available MCP Tools
+## Available MCP Tools (23)
 
 | Tool | Purpose |
 |---|---|
+| `get_futures_market` | Raw OHLCV + ticker + mark price for a symbol |
+| `scan_market` | Scan top USDT perps, rank by volume + TA signal (parallel worker pool) |
+| `analyze_market` | Deep TA for one symbol: RSI, MACD, EMA, BB, ATR, ADX |
+| `analyze_mtf` | Single-call MTF analysis: 4h/1h/15m/5m (use for efficiency) |
+| `get_funding_rates` | Current funding rates across symbols |
+| `get_account_status` | Balance, margin, open position count |
+| `get_open_positions` | All open positions with health status |
+| `get_open_orders` | Pending SL/TP/limit orders |
+| `place_futures_order` | Open new LONG or SHORT with auto SL/TP (LIMIT default, maker fee) |
+| `close_position` | Market-close 100% + cancel its orders |
+| `partial_close_position` | Close partial amount (e.g. 50%) of active position |
+| `set_position_stop_loss` | Set or update SL (STOP_MARKET) on active position |
+| `set_trailing_stop` | Native Binance dynamic Trailing Stop (callback 0.1-5%) |
+| `set_position_take_profit` | Set target TP (partial TP, LIMIT or MARKET) |
+| `cancel_order` | Cancel single order by ID |
+| `cancel_all_orders` | Cancel all orders for a symbol |
+| `set_leverage` | Set leverage before opening |
+| `monitor_positions` | Health check all positions, get action recommendations |
+| `get_trade_history` | Recent income/trade history |
+| `get_spot_account_status` | Spot balance + estimated USDT value |
+| `get_spot_open_orders` | Spot open orders |
+| `place_spot_order` | Place Spot BUY/SELL (MARKET/LIMIT) |
+| `cancel_spot_order` | Cancel Spot order by ID or client ID |
+
+---|---|
 | `scan_market` | Scan top USDT perps, rank by volume + TA signal |
 | `analyze_market` | Deep TA for one symbol: RSI, MACD, EMA, BB, ATR |
 | `get_futures_market` | Raw OHLCV + ticker + mark price for a symbol |
