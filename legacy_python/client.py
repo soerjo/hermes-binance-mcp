@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 BASE_URL: str = "https://fapi.binance.com"
 SPOT_BASE_URL: str = "https://api.binance.com"
 RECV_WINDOW: int = 30000  # 30s to absorb VPN latency jitter
+EXCHANGE_INFO_TTL: int = int(os.environ.get("EXCHANGE_INFO_TTL", "3600"))
+
+_EXCHANGE_INFO_CACHE: dict[str, Any] = {"data": None, "ts": 0.0}
 
 
 class BinanceAPIError(Exception):
@@ -221,9 +224,21 @@ class BinanceClient:
         """Check server connectivity and get current Binance server time."""
         return self._get("/fapi/v1/time")
 
-    def get_exchange_info(self) -> dict[str, Any]:
-        """Fetch current exchange trading rules and symbol information."""
-        return self._get("/fapi/v1/exchangeInfo")
+    def get_exchange_info(self, force_refresh: bool = False) -> dict[str, Any]:
+        """Fetch current exchange trading rules and symbol information (cached with TTL)."""
+        now = time.time()
+        if (
+            not force_refresh
+            and _EXCHANGE_INFO_CACHE["data"] is not None
+            and (now - _EXCHANGE_INFO_CACHE["ts"]) < EXCHANGE_INFO_TTL
+        ):
+            return _EXCHANGE_INFO_CACHE["data"]
+
+        data = self._get("/fapi/v1/exchangeInfo")
+        if isinstance(data, dict) and "symbols" in data:
+            _EXCHANGE_INFO_CACHE["data"] = data
+            _EXCHANGE_INFO_CACHE["ts"] = now
+        return data
 
     def get_klines(
         self,

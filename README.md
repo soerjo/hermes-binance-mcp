@@ -1,7 +1,10 @@
 # hermes-binance-mcp
 
-Autonomous Binance Futures trading MCP server for [Hermes Agent](https://github.com/NousResearch/hermes-agent).  
-Exposes **18 tools** via MCP so Hermes can scan markets, generate signals, and execute orders — fully autonomous.
+Autonomous Binance Futures trading MCP server for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+Exposes **23 tools** via MCP so Hermes can scan markets, generate signals, and execute orders.
+
+Rewritten in **Bun + TypeScript** for low-latency tool calls. The previous Python
+implementation is preserved in [`legacy_python/`](legacy_python/) for reference.
 
 ## Architecture
 
@@ -11,11 +14,13 @@ Hermes Agent
     │  HTTP SSE (localhost:8811)          ← container mode (recommended)
     │  stdio subprocess                   ← direct mode (fallback)
     ▼
-binance-mcp container
-    ├── server.py     MCPServer — 14 tools, dual transport (stdio/SSE)
-    ├── client.py     Binance Futures REST (HMAC, proxy support)
-    ├── analysis.py   RSI · MACD · EMA(20/50/200) · BB · ATR
-    └── risk.py       2% risk rule · max 3 pos · funding blackout
+binance-mcp (Bun)
+    ├── src/index.ts          dual transport (stdio / legacy SSE)
+    ├── src/tools/handlers.ts 23 MCP tools
+    ├── src/binance/client.ts Binance REST (HMAC, proxy, keep-alive)
+    ├── src/binance/ws-stream.ts mark-price WebSocket cache
+    ├── src/ta/               RSI · MACD · EMA · BB · ATR · ADX
+    └── src/risk/             2% risk rule · max 5 pos · funding blackout
           │
           ▼
     fapi.binance.com (Futures REST API)
@@ -27,6 +32,7 @@ binance-mcp container
 |---|---|
 | `scan_market` | Scan top USDT perps by volume, rank by TA score |
 | `analyze_market` | Deep TA for one symbol |
+| `analyze_mtf` | One-call multi-timeframe analysis (4h / 1h / 15m / 5m) |
 | `get_futures_market` | Raw OHLCV + ticker + mark price |
 | `get_funding_rates` | Current funding rates |
 | `get_account_status` | Balance, margin, open position count |
@@ -39,8 +45,8 @@ binance-mcp container
 | `set_trailing_stop` | Place native Binance dynamic Trailing Stop (callback 0.1-5%) |
 | `set_position_take_profit` | Set target TP order (supports partial TP e.g. 50%) |
 | `cancel_order` | Cancel one order by ID |
-| `cancel_all_orders` | Cancel all orders for a symbol |
-| `set_leverage` | Set leverage (max 10×) |
+| `cancel_all_orders` | Cancel all standard + algo orders for a symbol |
+| `set_leverage` | Set leverage (max 25×) |
 | `monitor_positions` | Health check all positions, return actions needed |
 | `get_trade_history` | Recent realized income |
 | `get_spot_account_status` | Spot coin balances (free/locked) + estimated total value in USDT |
@@ -53,20 +59,22 @@ binance-mcp container
 | Rule | Value |
 |---|---|
 | Max risk per trade | 2% of available balance |
-| Max open positions | 10 |
-| Max leverage | 50× (default 20×) |
+| Max open positions | 5 |
+| Max leverage | 25× (default 5×) |
 | Funding rate gate | Skip entry if \|rate\| > 0.1% |
-| Funding blackout | 30 min before/after each funding time |
-| Auto-execute threshold | confidence ≥ 70/100 |
+| Funding blackout | 30 min before funding settlement |
+| Minimum signal confidence | 60/100 |
+| Position sizing margin cap | 90% of free balance |
+
+All limits are environment-overridable (`MAX_RISK_PER_TRADE_PCT`,
+`MAX_OPEN_POSITIONS`, `MAX_LEVERAGE`, `MAX_FUNDING_RATE`,
+`FUNDING_BLACKOUT_MINUTES`, `MIN_CONFIDENCE`).
 
 ## Quick Start
 
 ### Container (Recommended)
 
 ```bash
-git clone https://github.com/soerjo/hermes-binance-mcp
-cd hermes-binance-mcp
-
 cp .env.template .env
 # Edit .env — tambah BINANCE_API_KEY dan BINANCE_API_SECRET
 # (API key harus enable Futures Trading permission)
@@ -77,7 +85,17 @@ docker compose logs -f   # verify running
 
 Test:
 ```bash
-curl http://localhost:8811/sse   # should respond with SSE stream
+curl http://localhost:8811/health
+curl http://localhost:8811/sse   # SSE stream
+```
+
+### Local development (Bun)
+
+```bash
+bun install
+bun run start:sse     # SSE on :8811
+bun test              # indicator + risk parity tests
+bun run typecheck
 ```
 
 ### Hermes `config.yaml` — SSE mode
@@ -94,9 +112,10 @@ mcp_servers:
 ```yaml
 mcp_servers:
   binance:
-    command: /path/to/.venv/bin/python
+    command: /home/soerjo/.bun/bin/bun
     args:
-      - /path/to/server.py
+      - run
+      - /path/to/hermes-binance-mcp/src/index.ts
     env:
       BINANCE_API_KEY: ${BINANCE_API_KEY}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET}
@@ -107,7 +126,6 @@ mcp_servers:
 ### Tambah Skill ke Hermes
 
 ```bash
-# Copy skill langsung sesuai struktur hierarki Hermes
 mkdir -p ~/.hermes/skills/trading/
 cp -r skills/trading/binance-futures-bot ~/.hermes/skills/trading/
 cp cron/binance_*.yaml ~/.hermes/cron/
@@ -120,7 +138,7 @@ skills:
     - binance-futures-bot
 ```
 
-Restart Hermes gateway, lalu bilang ke Hermes: **"scan market sekarang"** — dia langsung jalan.
+Restart Hermes gateway, lalu bilang ke Hermes: **"scan market sekarang"**.
 
 ## Cron Schedules
 
@@ -140,6 +158,9 @@ BINANCE_PROXY=socks5://your-proxy:1080
 BINANCE_PROXY=http://user:pass@proxy:3128
 ```
 
+When a proxy is configured the mark-price WebSocket is skipped automatically
+(Bun's WebSocket has no proxy option) and REST is used instead.
+
 ## Transport Modes
 
 | Env | Value | Use case |
@@ -148,10 +169,11 @@ BINANCE_PROXY=http://user:pass@proxy:3128
 | `MCP_TRANSPORT` | `stdio` | Subprocess — Hermes pakai `command:` |
 | `MCP_PORT` | `8811` | SSE listen port |
 | `MCP_HOST` | `0.0.0.0` | SSE bind host |
+| `BINANCE_WS_ENABLED` | `0` | Disable mark-price WebSocket cache |
 
 ## Stack
 
-Python 3.11 · [mcp](https://github.com/modelcontextprotocol/python-sdk) 2.x · httpx · pandas · ta · uvicorn
+Bun 1.4 · TypeScript · [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) 1.x · Zod
 
 ## License
 

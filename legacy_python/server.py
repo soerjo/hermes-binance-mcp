@@ -29,6 +29,8 @@ from risk import (
     check_position_health,
     calculate_position_size,
     get_symbol_precision,
+    round_step_qty,
+    round_tick_price,
 )
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -210,6 +212,46 @@ def analyze_market(symbol: str, interval: str = "15m") -> dict:
         "analysis":      analysis,
         "score":         score,
         "suggested_sl_tp": sl_tp,
+    }
+
+
+@mcp.tool()
+@safe_tool
+def analyze_mtf(symbol: str) -> dict:
+    """
+    Single-call Multi-Timeframe (4h, 1h, 15m, 5m) technical analysis for a symbol.
+    Reuses one HTTP connection pool to minimize latency and rate-limit usage.
+
+    Args:
+        symbol: e.g. "BTCUSDT"
+    """
+    with _client() as c:
+        mark_data = c.get_mark_price(symbol)
+        klines_4h = c.get_klines(symbol, "4h", 210)
+        klines_1h = c.get_klines(symbol, "1h", 210)
+        klines_15m = c.get_klines(symbol, "15m", 210)
+        klines_5m = c.get_klines(symbol, "5m", 100)
+
+    funding_rate = float(mark_data.get("lastFundingRate", 0))
+    mark_price = float(mark_data.get("markPrice", 0))
+    next_funding_ms = int(mark_data.get("nextFundingTime", 0))
+
+    tf_4h = analyze_symbol(klines_4h)
+    tf_1h = analyze_symbol(klines_1h)
+    tf_15m = analyze_symbol(klines_15m)
+    tf_5m = analyze_symbol(klines_5m)
+
+    return {
+        "symbol": symbol,
+        "mark_price": mark_price,
+        "funding_rate": funding_rate,
+        "next_funding_time": next_funding_ms,
+        "timeframes": {
+            "4h": tf_4h,
+            "1h": tf_1h,
+            "15m": tf_15m,
+            "5m": tf_5m,
+        },
     }
 
 
@@ -489,6 +531,7 @@ def place_futures_order(
     sl_price: Optional[float] = None,
     tp_price: Optional[float] = None,
     qty: Optional[float] = None,
+    notional_usdt: Optional[float] = None,
     use_auto_sizing: bool = True,
     margin_type: str = "ISOLATED",
     order_type: str = "LIMIT",
@@ -497,15 +540,16 @@ def place_futures_order(
 ) -> dict:
     """
     Place a Binance Futures LONG or SHORT with auto position sizing, SL, and TP.
-    Risk rules enforced automatically. Primary order execution tool.
+    Risk rules and exchange LOT_SIZE / PRICE_FILTER precision enforced automatically.
 
     Args:
         symbol: e.g. "BTCUSDT"
         side: "LONG" or "SHORT"
-        leverage: 1-10 (default 5)
+        leverage: 1-MAX_LEVERAGE (default 5)
         sl_price: stop-loss price (auto-calc from ATR if omitted)
         tp_price: take-profit price (auto-calc if omitted)
         qty: manual quantity (only if use_auto_sizing=False)
+        notional_usdt: target notional in USDT (optional, auto-converts to exact exchange qty)
         use_auto_sizing: size by 2% risk rule automatically
         margin_type: "ISOLATED" or "CROSSED"
         order_type: "LIMIT" (default — maker fee) or "MARKET" (taker, explicit only)
@@ -513,8 +557,6 @@ def place_futures_order(
                auto-picked from the order book (best bid for LONG, best ask for SHORT)
         time_in_force: "GTC" (default), "IOC", "FOK" — only for LIMIT
     """
-    import math
-
     if leverage > MAX_LEVERAGE:
         return {"error": f"Max leverage is {MAX_LEVERAGE}. Risk rule enforced."}
     if side not in ("LONG", "SHORT"):
@@ -547,17 +589,17 @@ def place_futures_order(
     mark_price          = float(mark_data.get("markPrice", 0))
     free_balance        = float(account.get("availableBalance", 0))
 
+    precision = get_symbol_precision(exchange_info, symbol)
+
     # Entry price basis: MARKET fills ~at mark; LIMIT executes at the requested price.
     # Sizing and SL/TP must use the actual entry price, not mark, to keep the 2% risk rule accurate.
     if type_upper == "LIMIT":
-        precision   = get_symbol_precision(exchange_info, symbol)
-        entry_price = round(float(price or 0.0), precision["price_precision"])
+        entry_price = round_tick_price(float(price or 0.0), precision["price_tick"], precision["price_precision"])
         if entry_price <= 0:
             return {"error": "Limit price must be > 0"}
         if (side == "LONG" and entry_price > mark_price) or (side == "SHORT" and entry_price < mark_price):
             log.warning(f"{symbol} LIMIT {side} crosses the book — may fill as TAKER, not maker")
     else:
-        precision   = get_symbol_precision(exchange_info, symbol)
         entry_price = mark_price
 
     # Auto SL/TP from ATR
@@ -585,24 +627,40 @@ def place_futures_order(
     except RiskError as e:
         return {"error": f"Risk rule blocked: {e}", "blocked": True}
 
-    # Position sizing
-    if use_auto_sizing:
-        sizing    = calculate_position_size(free_balance, entry_price, sl_price, leverage)
-        step      = 10 ** -precision["qty_precision"]
-        order_qty = round(math.floor(sizing["qty"] / step) * step, precision["qty_precision"])
+    # Position sizing & exchange LOT_SIZE normalization
+    if notional_usdt is not None and notional_usdt > 0:
+        raw_qty = notional_usdt / entry_price
+        order_qty = round_step_qty(raw_qty, precision["qty_step"], precision["qty_precision"])
+    elif use_auto_sizing:
+        sizing    = calculate_position_size(
+            free_balance, entry_price, sl_price, leverage, qty_step=precision["qty_step"]
+        )
+        order_qty = round_step_qty(sizing["qty"], precision["qty_step"], precision["qty_precision"])
     else:
         if qty is None:
-            return {"error": "qty required when use_auto_sizing=False"}
-        order_qty = qty
+            return {"error": "qty or notional_usdt required when use_auto_sizing=False"}
+        order_qty = round_step_qty(float(qty), precision["qty_step"], precision["qty_precision"])
 
-    if order_qty <= 0:
-        return {"error": "Calculated qty is 0 — check balance or widen SL"}
+    if order_qty < precision["min_qty"]:
+        return {
+            "error": (
+                f"Calculated qty {order_qty} is below symbol min_qty {precision['min_qty']} "
+                f"(stepSize={precision['qty_step']})"
+            )
+        }
+    if order_qty * entry_price < precision["min_notional"]:
+        return {
+            "error": (
+                f"Order notional ${order_qty * entry_price:.2f} is below symbol min_notional "
+                f"${precision['min_notional']:.2f}"
+            )
+        }
 
     order_side = "BUY"  if side == "LONG"  else "SELL"
     sl_side    = "SELL" if side == "LONG"  else "BUY"
     tp_side    = "SELL" if side == "LONG"  else "BUY"
-    sl_price_r = round(sl_price, precision["price_precision"])
-    tp_price_r = round(tp_price, precision["price_precision"])
+    sl_price_r = round_tick_price(sl_price, precision["price_tick"], precision["price_precision"])
+    tp_price_r = round_tick_price(tp_price, precision["price_tick"], precision["price_precision"])
 
     log.info(f"Placing {side} {symbol}: {type_upper} qty={order_qty} @ {entry_price} SL={sl_price_r} TP={tp_price_r} {leverage}x")
 
@@ -684,7 +742,7 @@ def place_futures_order(
 @safe_tool
 def close_position(symbol: str) -> dict:
     """
-    Market-close an open position and cancel its pending SL/TP orders.
+    Market-close an open position and cancel its pending standard & algo SL/TP orders.
 
     Args:
         symbol: e.g. "BTCUSDT"
@@ -694,8 +752,26 @@ def close_position(symbol: str) -> dict:
             cancelled = c.cancel_all_orders(symbol)
         except BinanceAPIError as e:
             cancelled = {"error": str(e)}
+
+        cancelled_algos = []
+        try:
+            open_algos = c.get_open_algo_orders(symbol)
+            for o in open_algos:
+                try:
+                    c.cancel_algo_order(symbol, o["algoId"])
+                    cancelled_algos.append(o["algoId"])
+                except Exception as e:
+                    log.warning(f"Failed to cancel algo {o.get('algoId')} on close: {e}")
+        except Exception as e:
+            log.warning(f"Could not list open algos on close: {e}")
+
         result = c.close_position(symbol)
-    return {"symbol": symbol, "close_result": result, "cancelled_orders": cancelled}
+    return {
+        "symbol": symbol,
+        "close_result": result,
+        "cancelled_orders": cancelled,
+        "cancelled_algo_orders": cancelled_algos,
+    }
 
 
 @mcp.tool()
@@ -718,8 +794,6 @@ def partial_close_position(
         order_type: "MARKET" (immediate execution) or "LIMIT" (at specific price)
         price: target limit price (required if order_type="LIMIT")
     """
-    import math
-
     with _client() as c:
         positions = c.get_position_risk(symbol)
         exchange_info = c.get_exchange_info()
@@ -743,8 +817,7 @@ def partial_close_position(
         return {"error": "Must provide either percentage or qty"}
 
     precision = get_symbol_precision(exchange_info, symbol)
-    step = 10 ** -precision["qty_precision"]
-    order_qty = round(math.floor(raw_qty / step) * step, precision["qty_precision"])
+    order_qty = round_step_qty(raw_qty, precision["qty_step"], precision["qty_precision"])
 
     if order_qty <= 0:
         return {"error": f"Calculated close qty {order_qty} is 0. Position size too small or precision issue."}
@@ -760,7 +833,7 @@ def partial_close_position(
     if order_type == "LIMIT":
         if price is None:
             return {"error": "price is required when order_type is LIMIT"}
-        order_params["price"] = round(price, precision["price_precision"])
+        order_params["price"] = round_tick_price(price, precision["price_tick"], precision["price_precision"])
         order_params["timeInForce"] = "GTC"
 
     log.info(f"Partial closing {symbol}: {order_qty} (target ~{percentage}%) via {order_type}")
@@ -827,8 +900,8 @@ def set_position_stop_loss(
                 log.warning(f"Could not list open algos: {e}")
 
     precision = get_symbol_precision(exchange_info, symbol)
-    stop_price_r = round(stop_price, precision["price_precision"])
-    qty = abs(pos_amt)
+    stop_price_r = round_tick_price(stop_price, precision["price_tick"], precision["price_precision"])
+    qty = round_step_qty(abs(pos_amt), precision["qty_step"], precision["qty_precision"])
 
     log.info(f"Setting Algo SL for {symbol} to {stop_price_r} (side={sl_side}, qty={qty})")
 
@@ -878,8 +951,6 @@ def set_trailing_stop(
         percentage: percentage of current position to protect with trailing stop (default 100.0)
         cancel_existing_sl: cancel prior stop orders so stops don't conflict (default True)
     """
-    import math
-
     if callback_rate < 0.1 or callback_rate > 5.0:
         return {"error": "callback_rate must be between 0.1% and 5.0%"}
 
@@ -898,14 +969,13 @@ def set_trailing_stop(
     side = "SELL" if pos_amt > 0 else "BUY"
 
     precision = get_symbol_precision(exchange_info, symbol)
-    step = 10 ** -precision["qty_precision"]
 
     if quantity is not None:
         raw_qty = quantity
     else:
         raw_qty = current_size * (percentage / 100.0)
 
-    order_qty = round(math.floor(raw_qty / step) * step, precision["qty_precision"])
+    order_qty = round_step_qty(raw_qty, precision["qty_step"], precision["qty_precision"])
     if order_qty <= 0:
         return {"error": "Calculated trailing stop qty is 0. Check size."}
 
@@ -937,7 +1007,7 @@ def set_trailing_stop(
     }
 
     if activation_price is not None:
-        params["activationPrice"] = round(activation_price, precision["price_precision"])
+        params["activationPrice"] = round_tick_price(activation_price, precision["price_tick"], precision["price_precision"])
 
     log.info(f"Placing Trailing Stop Algo on {symbol}: qty={order_qty}, rate={callback_rate}%")
 
@@ -977,8 +1047,6 @@ def set_position_take_profit(
         order_type: "TAKE_PROFIT_MARKET" or "LIMIT"
         cancel_existing_tp: cancel prior TP orders for this symbol first (default False)
     """
-    import math
-
     with _client() as c:
         positions = c.get_position_risk(symbol)
         exchange_info = c.get_exchange_info()
@@ -994,14 +1062,13 @@ def set_position_take_profit(
     side = "SELL" if pos_amt > 0 else "BUY"
 
     precision = get_symbol_precision(exchange_info, symbol)
-    step = 10 ** -precision["qty_precision"]
 
     if qty is not None:
         raw_qty = qty
     else:
         raw_qty = current_size * (percentage / 100.0)
 
-    order_qty = round(math.floor(raw_qty / step) * step, precision["qty_precision"])
+    order_qty = round_step_qty(raw_qty, precision["qty_step"], precision["qty_precision"])
     if order_qty <= 0:
         return {"error": "Calculated TP qty is 0. Check size."}
 
@@ -1020,7 +1087,7 @@ def set_position_take_profit(
             except Exception as e:
                 log.warning(f"Could not list open algos: {e}")
 
-    tp_price_r = round(tp_price, precision["price_precision"])
+    tp_price_r = round_tick_price(tp_price, precision["price_tick"], precision["price_precision"])
 
     with _client() as c:
         if order_type == "LIMIT":

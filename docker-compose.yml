@@ -25,8 +25,7 @@ services:
       MCP_PORT: "8811"
       LOG_LEVEL: INFO
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import socket; socket.create_connection(('localhost', 8811), 3).close()"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8811/health"]
       interval: 30s
       timeout: 5s
       retries: 3
