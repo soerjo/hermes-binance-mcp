@@ -29,6 +29,8 @@ import {
   calculatePositionSize,
   checkPositionHealth,
   checkPreTrade,
+  MAX_LEVERAGE,
+  MAX_OPEN_POSITIONS,
   RiskError,
 } from "../src/risk/engine";
 import type { BinanceKline } from "../src/binance/types";
@@ -276,11 +278,11 @@ describe("risk engine", () => {
   });
 
   test("leverage above the configured maximum is rejected", () => {
-    expect(() => calculatePositionSize(1000, 100, 98, 26)).toThrow(RiskError);
+    expect(() => calculatePositionSize(1000, 100, 98, MAX_LEVERAGE + 1)).toThrow(RiskError);
   });
 
   test("pre-trade gate rejects a full portfolio", () => {
-    const positions = Array.from({ length: 5 }, (_, i) => ({
+    const positions = Array.from({ length: MAX_OPEN_POSITIONS }, (_, i) => ({
       symbol: `S${i}`,
       positionAmt: "1",
     }));

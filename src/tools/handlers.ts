@@ -77,7 +77,10 @@ function fmtPos(p: Record<string, unknown>): Record<string, unknown> {
     unrealized_pnl: num(p.unRealizedProfit),
     leverage: intOf(p.leverage, 1),
     margin_type: p.marginType,
-    initial_margin: num(p.initialMargin),
+    initial_margin:
+      num(p.initialMargin) ||
+      num(p.isolatedWallet) ||
+      num(p.positionInitialMargin),
   };
 }
 

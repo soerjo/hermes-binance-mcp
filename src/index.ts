@@ -15,6 +15,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { config } from "./config";
 import { createLogger } from "./logger";
 import { markPriceStream } from "./binance/ws-stream";
+import { stopDohTunnel } from "./binance/doh-tunnel";
 import { createServer } from "./tools/handlers";
 
 const log = createLogger("main");
@@ -41,6 +42,7 @@ function startSseServer(): void {
   const shutdown = (signal: string) => {
     log.info(`Received ${signal}; shutting down`);
     markPriceStream.stop();
+    stopDohTunnel();
     httpServer.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();
   };
@@ -128,6 +130,7 @@ async function startStdioServer(): Promise<void> {
 
   const shutdown = () => {
     markPriceStream.stop();
+    stopDohTunnel();
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);

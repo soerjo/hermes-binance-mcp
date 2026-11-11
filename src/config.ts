@@ -39,6 +39,9 @@ export const config = {
   get proxy(): string | undefined {
     return process.env.BINANCE_PROXY || process.env.HTTPS_PROXY || undefined;
   },
+  get dohEnabled(): boolean {
+    return envStr("BINANCE_DOH_ENABLED", "1") !== "0";
+  },
 
   // Analysis defaults
   scanTopN: envInt("SCAN_TOP_N", 15),
