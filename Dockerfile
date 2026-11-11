@@ -9,7 +9,7 @@ RUN bun install --frozen-lockfile --production
 COPY tsconfig.json ./
 COPY src ./src
 
-RUN addgroup -S -g 1000 mcp && adduser -S -u 1000 -G mcp mcp
+RUN addgroup -S -g 1001 mcp && adduser -S -u 1001 -G mcp mcp
 USER mcp
 
 ENV MCP_TRANSPORT=sse \
