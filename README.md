@@ -1,7 +1,7 @@
 # hermes-binance-mcp
 
 Autonomous Binance Futures trading MCP server for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
-Exposes **23 tools** via MCP so Hermes can scan markets, generate signals, and execute orders.
+Exposes **26 tools** via MCP so Hermes can scan markets, generate signals, and execute orders.
 
 Rewritten in **Bun + TypeScript** for low-latency tool calls. The previous Python
 Python implementation is preserved in the Git commit history for reference and rollback.
@@ -16,7 +16,7 @@ Hermes Agent
     ▼
 binance-mcp (Bun)
     ├── src/index.ts          dual transport (stdio / legacy SSE)
-    ├── src/tools/handlers.ts 23 MCP tools
+    ├── src/tools/handlers.ts 26 MCP tools
     ├── src/binance/client.ts Binance REST (HMAC, proxy, keep-alive)
     ├── src/binance/ws-stream.ts mark-price WebSocket cache
     ├── src/ta/               RSI · MACD · EMA · BB · ATR · ADX
@@ -32,13 +32,16 @@ binance-mcp (Bun)
 |---|---|
 | `scan_market` | Scan top USDT perps by volume, rank by TA score |
 | `analyze_market` | Deep TA for one symbol |
-| `analyze_mtf` | One-call multi-timeframe analysis (4h / 1h / 15m / 5m) |
+| `analyze_mtf` | One-call multi-timeframe analysis (default 4h / 1h / 15m / 5m; `intervals` opsional) |
 | `get_futures_market` | Raw OHLCV + ticker + mark price |
 | `get_funding_rates` | Current funding rates |
+| `get_symbol_precision` | LOT_SIZE / PRICE_FILTER / MIN_NOTIONAL untuk sizing final |
+| `get_derivatives_context` | Open Interest + Top Trader Long/Short ratio |
+| `recommend_trading_style` | Rekomendasi rezim swing/intraday/scalp/wait + BTC bias + veto |
 | `get_account_status` | Balance, margin, open position count |
 | `get_open_positions` | All positions with health status (OK/WARN/CRITICAL) |
 | `get_open_orders` | Pending SL/TP/limit orders |
-| `place_futures_order` | Open LONG/SHORT — auto sizing, auto SL/TP via ATR |
+| `place_futures_order` | Open LONG/SHORT — auto sizing, auto SL/TP via ATR; opsional `max_risk_usdt`/`reference_price` guard |
 | `close_position` | Market-close 100% of position + cancel its orders |
 | `partial_close_position` | Close partial (e.g. 50%) of active position (MARKET or LIMIT) |
 | `set_position_stop_loss` | Set or update SL (STOP_MARKET) on an active position |
@@ -69,6 +72,10 @@ binance-mcp (Bun)
 All limits are environment-overridable (`MAX_RISK_PER_TRADE_PCT`,
 `MAX_OPEN_POSITIONS`, `MAX_LEVERAGE`, `MAX_FUNDING_RATE`,
 `FUNDING_BLACKOUT_MINUTES`, `MIN_CONFIDENCE`).
+
+> **Catatan trading otomatis**: order otomatis dikendalikan oleh engine
+> `crypto-trading-engine` (global switch `auto-entry`, default OFF). MCP hanya
+> menyediakan tool; cron scan default **hanya melapor**, tidak auto-execute.
 
 ## Quick Start
 
@@ -144,7 +151,7 @@ Restart Hermes gateway, lalu bilang ke Hermes: **"scan market sekarang"**.
 
 | Job | Schedule | Action |
 |---|---|---|
-| `binance_morning_scan` | `0 0,12 * * *` | 07:00 + 19:00 WIB — scan & auto-execute |
+| `binance_morning_scan` | `0 0,12 * * *` | 07:00 + 19:00 WIB — scan & **laporkan** (tanpa auto-execute) |
 | `binance_position_monitor` | `*/30 * * * *` | Monitor posisi, auto-close critical loss |
 | `binance_funding_alert` | `55 7,15,23 * * *` | Alert 5 menit sebelum funding time |
 
@@ -174,6 +181,12 @@ When a proxy is configured the mark-price WebSocket is skipped automatically
 ## Stack
 
 Bun 1.4 · TypeScript · [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) 1.x · Zod
+
+## Deployment
+
+Runbook lengkap (MCP Docker → engine Bun di host → verifikasi Hermes, batas
+kewenangan Agent, rollback):
+[`../crypto-trading-engine/docs/DEPLOYMENT.md`](../crypto-trading-engine/docs/DEPLOYMENT.md)
 
 ## License
 

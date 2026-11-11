@@ -7,7 +7,7 @@
 - **Repo**: `soerjo/hermes-binance-mcp`
 - **Runtime**: Bun (TypeScript), port default `8811` (SSE) atau stdio.
 - **Transport**: `MCP_TRANSPORT=stdio` (default, untuk subprocess Hermes) atau `sse` (container/HTTP).
-- **Fungsi**: Menyediakan 23 MCP tool untuk data pasar Binance USDT-M Futures + Spot, analisis teknikal, manajemen risiko, dan eksekusi order.
+- **Fungsi**: Menyediakan 26 MCP tool untuk data pasar Binance USDT-M Futures + Spot, analisis teknikal, manajemen risiko, dan eksekusi order.
 - **Keamanan jaringan**: Built-in DoH auto-tunnel (bypass DNS poisoning ISP Indonesia) aktif otomatis bila `BINANCE_PROXY` kosong.
 
 ## 2. Konfigurasi Environment (`.env`)
@@ -46,7 +46,7 @@
 9. **Jangan retry order setelah POST diterima**: Jika response timeout, cek `get_open_orders` / `get_open_positions` dulu sebelum re-send (hindari order ganda).
 10. **Auto-entry engine adalah domain `crypto-trading-engine`, bukan tool MCP ini.** Untuk menyalakan/mematikan entry otomatis, Agent harus menjalankan CLI engine (lihat `SKILL.md` / `docs/AGENT_GUIDE.md` di repo engine), bukan memanggil `place_futures_order` sendiri berulang-ulang. Default switch: **OFF (manual-only)**; `auto-entry on` HANYA atas permintaan eksplisit pengguna.
 
-## 4. Daftar Tool (23) & Cara Pakai
+## 4. Daftar Tool (26) & Cara Pakai
 
 ### Market Data
 
@@ -146,11 +146,15 @@ docker compose up -d
 
 Gluetun VPN sidecar: gunakan `docker-compose.vpn.yml` jika perlu proxy. DoH auto-tunnel aktif otomatis bila `BINANCE_PROXY` kosong.
 
+**Runbook deployment lengkap untuk Hermes Agent** (urutan MCP → engine, secrets,
+verifikasi read-only, batas kewenangan, rollback):
+[`../../crypto-trading-engine/docs/DEPLOYMENT.md`](../../crypto-trading-engine/docs/DEPLOYMENT.md)
+
 ## 8. File Penting
 
 | File | Fungsi |
 | :--- | :--- |
-| `src/tools/handlers.ts` | 23 tool registrations (kontrak MCP) |
+| `src/tools/handlers.ts` | 26 tool registrations (kontrak MCP) |
 | `src/binance/client.ts` | REST client (HMAC, retry, time-sync) |
 | `src/binance/ws-stream.ts` | WebSocket mark-price cache |
 | `src/binance/doh-tunnel.ts` | DoH auto-tunnel (bypass DNS poisoning) |
