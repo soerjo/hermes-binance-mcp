@@ -55,7 +55,8 @@
 | `scan_market` | `top_n` (default 15), `interval` (default 15m), `min_volume_usdt` (default 50M) | `scanned`, `actionable`, `top_opportunities[]`, `ranked_actionable[]` (max 5) |
 | `analyze_market` | `symbol`, `interval` (default 15m) | `mark_price`, `funding_rate`, `analysis` (RSI, MACD, EMA, BB, ATR, ADX, trend, signal, confidence), `score`, `suggested_sl_tp` |
 | `analyze_mtf` | `symbol`, `intervals` (opsional) | `mark_price`, `funding_rate`, `timeframes` — **gunakan ini untuk efisiensi**. `intervals` default 4h/1h/15m/5m, bisa custom (e.g. ["1d","4h","1h","15m"] untuk swing) |
-| `recommend_trading_style` | (none) | Analisa BTC/ETH/SOL 1d/4h/1h/15m → rekomendasi swing/intraday/scalp/wait + BTC bias + veto + suggested targets |
+| `recommend_trading_style` | (none) | Analisa BTC/ETH/SOL 1d/4h/1h/15m → rekomendasi swing/intraday/scalp/wait + BTC bias + veto + suggested targets. Data leader tidak lengkap → `wait_and_see` / rezim `INSUFFICIENT_DATA` |
+| `get_symbol_precision` | `symbol` | Filter presisi exchange: `qty_step`, `price_tick`, `min_qty`, `min_notional` — dipakai engine untuk sizing final yang mematuhi risk cap |
 | `get_funding_rates` | `symbols` (opsional, array) | Array mark price + funding rate, diurutkan by abs rate (top 20 jika tanpa symbols) |
 
 ### Account & Positions

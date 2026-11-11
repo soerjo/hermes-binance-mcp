@@ -29,12 +29,12 @@ import {
   calculatePositionSize,
   checkPositionHealth,
   checkPreTrade,
-  getSymbolPrecision,
   MAX_LEVERAGE,
   RiskError,
   roundStepQty,
   roundTickPrice,
 } from "../risk/engine";
+import { getSymbolPrecision } from "../risk/precision";
 
 const log = createLogger("tools");
 
@@ -332,6 +332,32 @@ export function createServer(): McpServer {
             .slice(0, 20);
         }
         return [allMark];
+      }),
+  );
+
+  server.registerTool(
+    "get_symbol_precision",
+    {
+      description:
+        "Get Binance Futures LOT_SIZE / PRICE_FILTER / MIN_NOTIONAL precision for a symbol.",
+      inputSchema: {
+        symbol: z.string().describe('e.g. "BTCUSDT"'),
+      },
+    },
+    async ({ symbol }) =>
+      safe("get_symbol_precision", async () => {
+        const client = getClient();
+        const exchangeInfo = await client.getExchangeInfo();
+        const precision = getSymbolPrecision(exchangeInfo, symbol);
+        return {
+          symbol,
+          qty_precision: precision.qty_precision,
+          price_precision: precision.price_precision,
+          min_qty: precision.min_qty,
+          min_notional: precision.min_notional,
+          qty_step: precision.qty_step,
+          price_tick: precision.price_tick,
+        };
       }),
   );
 
