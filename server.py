@@ -491,6 +491,9 @@ def place_futures_order(
     qty: Optional[float] = None,
     use_auto_sizing: bool = True,
     margin_type: str = "ISOLATED",
+    order_type: str = "MARKET",
+    price: Optional[float] = None,
+    time_in_force: str = "GTC",
 ) -> dict:
     """
     Place a Binance Futures LONG or SHORT with auto position sizing, SL, and TP.
@@ -505,6 +508,9 @@ def place_futures_order(
         qty: manual quantity (only if use_auto_sizing=False)
         use_auto_sizing: size by 2% risk rule automatically
         margin_type: "ISOLATED" or "CROSSED"
+        order_type: "MARKET" (taker) or "LIMIT" (maker fee — preferred for entries)
+        price: limit order price (required for LIMIT; sizing/SL/TP use this price)
+        time_in_force: "GTC" (default), "IOC", "FOK" — only for LIMIT
     """
     import math
 
@@ -512,6 +518,12 @@ def place_futures_order(
         return {"error": f"Max leverage is {MAX_LEVERAGE}. Risk rule enforced."}
     if side not in ("LONG", "SHORT"):
         return {"error": "side must be LONG or SHORT"}
+
+    type_upper = order_type.upper()
+    if type_upper not in ("MARKET", "LIMIT"):
+        return {"error": "order_type must be MARKET or LIMIT"}
+    if type_upper == "LIMIT" and price is None:
+        return {"error": "price is required for LIMIT orders"}
 
     with _client() as c:
         account       = c.get_account()
@@ -526,16 +538,31 @@ def place_futures_order(
     mark_price          = float(mark_data.get("markPrice", 0))
     free_balance        = float(account.get("availableBalance", 0))
 
+    # Entry price basis: MARKET fills ~at mark; LIMIT executes at the requested price.
+    # Sizing and SL/TP must use the actual entry price, not mark, to keep the 2% risk rule accurate.
+    if type_upper == "LIMIT":
+        precision   = get_symbol_precision(exchange_info, symbol)
+        entry_price = round(float(price or 0.0), precision["price_precision"])
+        if entry_price <= 0:
+            return {"error": "Limit price must be > 0"}
+        if (side == "LONG" and entry_price > mark_price) or (side == "SHORT" and entry_price < mark_price):
+            log.warning(f"{symbol} LIMIT {side} crosses the book — may fill as TAKER, not maker")
+    else:
+        precision   = get_symbol_precision(exchange_info, symbol)
+        entry_price = mark_price
+
     # Auto SL/TP from ATR
     if sl_price is None or tp_price is None:
         with _client() as c:
             klines   = c.get_klines(symbol, "4h", 200)
         analysis = analyze_symbol(klines)
-        sl_tp    = calculate_sl_tp(mark_price, side, analysis["atr"], RISK_REWARD)
+        sl_tp    = calculate_sl_tp(entry_price, side, analysis["atr"], RISK_REWARD)
         if sl_price is None:
             sl_price = sl_tp["sl"]
         if tp_price is None:
             tp_price = sl_tp["tp"]
+    if sl_price is None or tp_price is None:
+        return {"error": "SL/TP could not be determined (ATR unavailable?) — pass sl_price/tp_price explicitly"}
 
     # Risk checks
     try:
@@ -550,9 +577,8 @@ def place_futures_order(
         return {"error": f"Risk rule blocked: {e}", "blocked": True}
 
     # Position sizing
-    precision = get_symbol_precision(exchange_info, symbol)
     if use_auto_sizing:
-        sizing    = calculate_position_size(free_balance, mark_price, sl_price, leverage)
+        sizing    = calculate_position_size(free_balance, entry_price, sl_price, leverage)
         step      = 10 ** -precision["qty_precision"]
         order_qty = round(math.floor(sizing["qty"] / step) * step, precision["qty_precision"])
     else:
@@ -569,7 +595,16 @@ def place_futures_order(
     sl_price_r = round(sl_price, precision["price_precision"])
     tp_price_r = round(tp_price, precision["price_precision"])
 
-    log.info(f"Placing {side} {symbol}: qty={order_qty} ~{mark_price} SL={sl_price_r} TP={tp_price_r} {leverage}x")
+    log.info(f"Placing {side} {symbol}: {type_upper} qty={order_qty} @ {entry_price} SL={sl_price_r} TP={tp_price_r} {leverage}x")
+
+    # LIMIT entry fills asynchronously -> position may be 0 when SL/TP are placed.
+    # reduceOnly is rejected at position=0, so per standing rule LIMIT entries use
+    # closePosition=True (closes the whole symbol position on trigger, no position required).
+    sl_tp_protect = (
+        {"closePosition": True}
+        if type_upper == "LIMIT"
+        else {"quantity": order_qty, "reduceOnly": True}
+    )
 
     results = {}
     with _client() as c:
@@ -582,10 +617,17 @@ def place_futures_order(
         except BinanceAPIError as e:
             log.warning(f"Margin type skip: {e}")
 
-        results["entry"] = c.place_order(
-            symbol=symbol, side=order_side, type="MARKET",
-            quantity=order_qty, reduceOnly=False,
-        )
+        if type_upper == "LIMIT":
+            results["entry"] = c.place_order(
+                symbol=symbol, side=order_side, type="LIMIT",
+                quantity=order_qty, price=entry_price,
+                timeInForce=time_in_force.upper(), reduceOnly=False,
+            )
+        else:
+            results["entry"] = c.place_order(
+                symbol=symbol, side=order_side, type="MARKET",
+                quantity=order_qty, reduceOnly=False,
+            )
         # Stop-loss via Algo Order API
         try:
             results["stop_loss"] = c.place_algo_order(
@@ -594,10 +636,9 @@ def place_futures_order(
                 type="STOP_MARKET",
                 algoType="CONDITIONAL",
                 triggerPrice=sl_price_r,
-                quantity=order_qty,
                 positionSide="BOTH",
-                reduceOnly=True,
                 workingType="CONTRACT_PRICE",
+                **sl_tp_protect,
             )
         except BinanceAPIError as e:
             results["stop_loss_error"] = str(e)
@@ -611,10 +652,9 @@ def place_futures_order(
                 type="TAKE_PROFIT_MARKET",
                 algoType="CONDITIONAL",
                 triggerPrice=tp_price_r,
-                quantity=order_qty,
                 positionSide="BOTH",
-                reduceOnly=True,
                 workingType="CONTRACT_PRICE",
+                **sl_tp_protect,
             )
         except BinanceAPIError as e:
             results["take_profit_error"] = str(e)
@@ -622,6 +662,7 @@ def place_futures_order(
 
     results["summary"] = {
         "symbol": symbol, "side": side, "qty": order_qty,
+        "order_type": type_upper, "entry_price": entry_price,
         "entry_price_approx": mark_price, "sl": sl_price_r,
         "tp": tp_price_r, "leverage": leverage,
         "risk_usdt": round(free_balance * 0.02, 2),
