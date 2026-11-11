@@ -316,3 +316,100 @@ export function smaLast(values: Float64Array, window: number): number {
   for (let i = values.length - window; i < values.length; i += 1) sum += values[i];
   return sum / window;
 }
+
+// ── Extended indicators for regime detection & orderflow ─────────────────────
+
+/** Choppiness Index (CHOP 14). < 38.2 = strong trend, > 61.8 = choppy. */
+export function choppiness(
+  high: Float64Array,
+  low: Float64Array,
+  close: Float64Array,
+  window = 14,
+): number {
+  const n = high.length;
+  if (n < window + 1) return NaN_VALUE;
+
+  let trSum = 0;
+  for (let i = n - window; i < n; i += 1) {
+    const range = high[i] - low[i];
+    if (i === 0) { trSum += range; continue; }
+    const prevClose = close[i - 1];
+    trSum += Math.max(range, Math.abs(high[i] - prevClose), Math.abs(low[i] - prevClose));
+  }
+
+  let maxHigh = -Infinity;
+  let minLow = Infinity;
+  for (let i = n - window; i < n; i += 1) {
+    if (high[i] > maxHigh) maxHigh = high[i];
+    if (low[i] < minLow) minLow = low[i];
+  }
+  const rangeHL = maxHigh - minLow;
+  if (rangeHL <= 0) return NaN_VALUE;
+
+  return 100 * (Math.log10(trSum / rangeHL) / Math.log10(window));
+}
+
+/** Volume-Weighted Average Price over the last `window` bars. */
+export function vwap(
+  high: Float64Array,
+  low: Float64Array,
+  close: Float64Array,
+  volume: Float64Array,
+  window = 20,
+): number {
+  const n = high.length;
+  if (n < window || window <= 0) return NaN_VALUE;
+
+  let pvSum = 0;
+  let volSum = 0;
+  for (let i = n - window; i < n; i += 1) {
+    const typicalPrice = (high[i] + low[i] + close[i]) / 3;
+    pvSum += typicalPrice * volume[i];
+    volSum += volume[i];
+  }
+  if (volSum === 0) return NaN_VALUE;
+  return pvSum / volSum;
+}
+
+/** Swing High / Swing Low structural levels over the last `window` bars. */
+export function swingLevels(
+  high: Float64Array,
+  low: Float64Array,
+  window = 20,
+): { swingHigh: number; swingLow: number } {
+  const n = high.length;
+  if (n < window || window <= 0) {
+    return { swingHigh: NaN_VALUE, swingLow: NaN_VALUE };
+  }
+  let maxHigh = -Infinity;
+  let minLow = Infinity;
+  for (let i = n - window; i < n; i += 1) {
+    if (high[i] > maxHigh) maxHigh = high[i];
+    if (low[i] < minLow) minLow = low[i];
+  }
+  return {
+    swingHigh: Number.isFinite(maxHigh) ? maxHigh : NaN_VALUE,
+    swingLow: Number.isFinite(minLow) ? minLow : NaN_VALUE,
+  };
+}
+
+/** Taker Buy Ratio — fraction of volume that was aggressive (market) buying. */
+export function takerBuyRatio(takerBuyVol: number, totalVol: number): number {
+  if (totalVol <= 0) return 0.5;
+  const ratio = takerBuyVol / totalVol;
+  return Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) : 0.5;
+}
+
+/** Relative Strength vs BTC — percentage difference over `window` bars. */
+export function relativeStrength(
+  symbolClose: Float64Array,
+  btcClose: Float64Array,
+  window = 24,
+): number {
+  const n = Math.min(symbolClose.length, btcClose.length);
+  if (n < window + 1 || window <= 0) return 0;
+  const symChange = (symbolClose[n - 1] - symbolClose[n - 1 - window]) / symbolClose[n - 1 - window];
+  const btcChange = (btcClose[n - 1] - btcClose[n - 1 - window]) / btcClose[n - 1 - window];
+  if (!Number.isFinite(symChange) || !Number.isFinite(btcChange)) return 0;
+  return (symChange - btcChange) * 100;
+}
