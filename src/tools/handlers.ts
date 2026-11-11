@@ -277,33 +277,32 @@ export function createServer(): McpServer {
     "analyze_mtf",
     {
       description:
-        "Single-call Multi-Timeframe (4h, 1h, 15m, 5m) technical analysis for a symbol.",
+        "Single-call Multi-Timeframe technical analysis for a symbol. Default intervals: 4h, 1h, 15m, 5m. Pass `intervals` for custom (e.g. swing: 1d, 4h, 1h, 15m).",
       inputSchema: {
         symbol: z.string().describe('e.g. "BTCUSDT"'),
+        intervals: z
+          .array(z.string())
+          .optional()
+          .describe('e.g. ["1d","4h","1h","15m"] (default 4h,1h,15m,5m)'),
       },
     },
-    async ({ symbol }) =>
+    async ({ symbol, intervals }) =>
       safe("analyze_mtf", async () => {
         const client = getClient();
         const markRaw = await client.getMarkPrice(symbol);
-        const [k4h, k1h, k15m, k5m] = await Promise.all([
-          client.getKlines(symbol, "4h", 210),
-          client.getKlines(symbol, "1h", 210),
-          client.getKlines(symbol, "15m", 210),
-          client.getKlines(symbol, "5m", 100),
-        ]);
+        const ivs = intervals && intervals.length > 0 ? intervals : ["4h", "1h", "15m", "5m"];
+        const klines = await Promise.all(ivs.map((iv) => client.getKlines(symbol, iv, iv === "5m" ? 100 : 210)));
         const mark = oneMark(markRaw);
+        const timeframes: Record<string, SymbolAnalysis> = {};
+        ivs.forEach((iv, i) => {
+          timeframes[iv] = analyzeSymbol(klines[i]);
+        });
         return {
           symbol,
           mark_price: num(mark.markPrice),
           funding_rate: num(mark.lastFundingRate),
           next_funding_time: intOf(mark.nextFundingTime),
-          timeframes: {
-            "4h": analyzeSymbol(k4h),
-            "1h": analyzeSymbol(k1h),
-            "15m": analyzeSymbol(k15m),
-            "5m": analyzeSymbol(k5m),
-          },
+          timeframes,
         };
       }),
   );
@@ -333,6 +332,202 @@ export function createServer(): McpServer {
             .slice(0, 20);
         }
         return [allMark];
+      }),
+  );
+
+  server.registerTool(
+    "get_derivatives_context",
+    {
+      description:
+        "Get Open Interest + Top Trader Long/Short ratio for a symbol (squeeze & trap detection).",
+      inputSchema: {
+        symbol: z.string().describe('e.g. "BTCUSDT"'),
+        period: z.string().default("5m").describe('period: "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"'),
+      },
+    },
+    async ({ symbol, period }) =>
+      safe("get_derivatives_context", async () => {
+        const client = getClient();
+        const [oi, topLs] = await Promise.all([
+          client.getOpenInterest(symbol),
+          client.getTopLongShortRatio(symbol, period, 1),
+        ]);
+        const latest = Array.isArray(topLs) && topLs.length > 0 ? topLs[topLs.length - 1] : null;
+        return {
+          symbol,
+          open_interest: num(oi?.openInterest),
+          oi_time: intOf(oi?.time),
+          top_trader_long_short_ratio: latest ? num(latest.longShortRatio) : null,
+          top_trader_long_pct: latest ? num(latest.longAccount) * 100 : null,
+          top_trader_short_pct: latest ? num(latest.shortAccount) * 100 : null,
+          period,
+        };
+      }),
+  );
+
+  server.registerTool(
+    "recommend_trading_style",
+    {
+      description:
+        "Analyze BTC/ETH/SOL across 1d/4h/1h/15m and recommend trading style (swing/intraday/scalp/wait) with regime, BTC bias, and suggested targets.",
+      inputSchema: {},
+    },
+    async () =>
+      safe("recommend_trading_style", async () => {
+        const client = getClient();
+        const leaders = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+        const ivs = ["1d", "4h", "1h", "15m"];
+        const data: Record<string, Record<string, SymbolAnalysis>> = {};
+        await Promise.all(
+          leaders.map(async (sym) => {
+            const ks = await Promise.all(ivs.map((iv) => client.getKlines(sym, iv, iv === "1d" ? 60 : 210)));
+            data[sym] = {};
+            ivs.forEach((iv, i) => {
+              data[sym][iv] = analyzeSymbol(ks[i]);
+            });
+          }),
+        );
+
+        // Compute metrics per leader
+        const metrics: Record<string, Record<string, unknown>> = {};
+        for (const sym of leaders) {
+          const tf4h = data[sym]["4h"];
+          const tf1h = data[sym]["1h"];
+          const tf15 = data[sym]["15m"];
+          metrics[sym] = {
+            trend_4h: tf4h.trend,
+            trend_1h: tf1h.trend,
+            adx_4h: tf4h.adx,
+            adx_1h: tf1h.adx,
+            bbw_4h: tf4h.bollinger?.bandwidth,
+            bbw_1h: tf1h.bollinger?.bandwidth,
+            bbw_15m: tf15.bollinger?.bandwidth,
+            rsi_15m: tf15.rsi?.value,
+            chop_15m: tf15.choppiness,
+            pctB_1h: tf1h.bollinger?.pct_b,
+          };
+        }
+
+        // Regime scoring
+        const btc = metrics["BTCUSDT"];
+        const eth = metrics["ETHUSDT"];
+        const sol = metrics["SOLUSDT"];
+
+        const adx4hAvg = ((btc.adx_4h as number) + (eth.adx_4h as number) + (sol.adx_4h as number)) / 3;
+        const adx1hAvg = ((btc.adx_1h as number) + (eth.adx_1h as number) + (sol.adx_1h as number)) / 3;
+        const bbw4hAvg = ((btc.bbw_4h as number) + (eth.bbw_4h as number) + (sol.bbw_4h as number)) / 3;
+        const bbw1hAvg = ((btc.bbw_1h as number) + (eth.bbw_1h as number) + (sol.bbw_1h as number)) / 3;
+
+        // Alignment: all 3 leaders same trend on 4h
+        const trends4h = [btc.trend_4h, eth.trend_4h, sol.trend_4h];
+        const allBullish4h = trends4h.every((t) => t === "BULLISH");
+        const allBearish4h = trends4h.every((t) => t === "BEARISH");
+        const aligned = allBullish4h || allBearish4h;
+
+        // BTC bias
+        let btcBias = "NEUTRAL_RANGE";
+        if (btc.trend_4h === "BULLISH" && btc.trend_1h === "BULLISH") btcBias = "BULLISH_BIAS";
+        else if (btc.trend_4h === "BEARISH" && btc.trend_1h === "BEARISH") btcBias = "BEARISH_BIAS";
+
+        // Choppy detection: high CHOP or low ADX
+        const chopAvg = ((btc.chop_15m as number) + (eth.chop_15m as number) + (sol.chop_15m as number)) / 3;
+        const isChoppy = chopAvg > 61.8 || adx4hAvg < 18;
+        const isStrongTrend = adx4hAvg >= 28 && aligned && bbw4hAvg >= 4.5;
+        const isModerate = adx4hAvg >= 18 && adx4hAvg < 28 && bbw1hAvg >= 1.8;
+
+        // Regime determination
+        let regime: string;
+        let recommended: string;
+        const scores = { swing: 0, intraday: 0, scalp: 0 };
+
+        if (isChoppy) {
+          regime = "CHOPPY_COMPRESSION";
+          recommended = "WAIT_AND_SEE";
+          scores.scalp = 40;
+          scores.intraday = 20;
+          scores.swing = 10;
+        } else if (isStrongTrend) {
+          regime = "MACRO_TREND_EXPANSION";
+          recommended = "swing";
+          scores.swing = 90;
+          scores.intraday = 50;
+          scores.scalp = 20;
+        } else if (isModerate) {
+          regime = "INTRADAY_RANGE_ROTATION";
+          recommended = "intraday";
+          scores.intraday = 80;
+          scores.scalp = 50;
+          scores.swing = 30;
+        } else {
+          regime = "HIGH_VOL_WHIPSAW";
+          recommended = "scalp";
+          scores.scalp = 70;
+          scores.intraday = 40;
+          scores.swing = 15;
+        }
+
+        const reasons: string[] = [];
+        reasons.push(`ADX 4H avg = ${adx4hAvg.toFixed(1)} (threshold: swing≥28, intraday≥18)`);
+        reasons.push(`BBW 4H avg = ${bbw4hAvg.toFixed(2)}% (swing needs ≥4.5%)`);
+        reasons.push(`BBW 1H avg = ${bbw1hAvg.toFixed(2)}% (intraday needs ≥1.8%)`);
+        reasons.push(`CHOP 15m avg = ${chopAvg.toFixed(1)} (>61.8 = choppy)`);
+        reasons.push(`Leader alignment 4H: ${aligned ? (allBullish4h ? "all BULLISH" : "all BEARISH") : "mixed"}`);
+        reasons.push(`BTC bias: ${btcBias}`);
+
+        // Suggested targets based on recommended style
+        const suggestedTargets: Record<string, unknown> = {};
+        if (recommended === "swing") {
+          suggestedTargets.tp_target_pct = 6.0;
+          suggestedTargets.sl_atr_mult = 2.0;
+          suggestedTargets.be_trigger_pct = 2.8;
+          suggestedTargets.partial_tp_pct = 4.2;
+          suggestedTargets.chandelier_pct = 7.0;
+          suggestedTargets.leverage_min = 5;
+          suggestedTargets.leverage_def = 8;
+          suggestedTargets.leverage_max = 10;
+          suggestedTargets.max_risk_pct = 2.2;
+        } else if (recommended === "intraday") {
+          suggestedTargets.tp_target_pct = 2.4;
+          suggestedTargets.sl_atr_mult = 1.5;
+          suggestedTargets.be_trigger_pct = 1.8;
+          suggestedTargets.partial_tp_pct = 2.2;
+          suggestedTargets.chandelier_pct = 4.0;
+          suggestedTargets.leverage_min = 10;
+          suggestedTargets.leverage_def = 15;
+          suggestedTargets.leverage_max = 20;
+          suggestedTargets.max_risk_pct = 2.0;
+        } else if (recommended === "scalp") {
+          suggestedTargets.tp_target_pct = 1.4;
+          suggestedTargets.sl_atr_mult = 1.2;
+          suggestedTargets.be_trigger_pct = 1.0;
+          suggestedTargets.partial_tp_pct = 1.3;
+          suggestedTargets.chandelier_pct = 2.0;
+          suggestedTargets.leverage_min = 10;
+          suggestedTargets.leverage_def = 15;
+          suggestedTargets.leverage_max = 20;
+          suggestedTargets.max_risk_pct = 1.8;
+        } else {
+          suggestedTargets.tp_target_pct = 0;
+          suggestedTargets.sl_atr_mult = 0;
+          suggestedTargets.be_trigger_pct = 0;
+          suggestedTargets.partial_tp_pct = 0;
+          suggestedTargets.chandelier_pct = 0;
+          suggestedTargets.leverage_min = 0;
+          suggestedTargets.leverage_def = 0;
+          suggestedTargets.leverage_max = 0;
+          suggestedTargets.max_risk_pct = 0;
+        }
+
+        return {
+          recommended_style: recommended,
+          regime,
+          btc_bias: btcBias,
+          scores,
+          market_metrics: metrics,
+          reasons,
+          suggested_targets: suggestedTargets,
+          auto_switch_available: true,
+        };
       }),
   );
 

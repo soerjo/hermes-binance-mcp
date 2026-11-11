@@ -10,12 +10,16 @@ import {
   adx,
   atr,
   bollinger,
+  choppiness,
   ema,
   last,
   macd,
   rsi,
   smaLast,
+  swingLevels,
+  takerBuyRatio,
   toFloat,
+  vwap,
 } from "./indicators";
 
 export const MIN_CANDLES = 60;
@@ -34,6 +38,7 @@ export interface Candle {
   close: number;
   volume: number;
   quoteVolume: number;
+  takerBuyBaseVol: number;
   openTime: number;
 }
 
@@ -70,6 +75,11 @@ export interface SymbolAnalysis {
   };
   atr?: number;
   adx?: number;
+  choppiness?: number;
+  vwap?: number;
+  swing_high?: number;
+  swing_low?: number;
+  taker_buy_ratio?: number;
   candle_action?: CandleAction;
   volume?: { current: number; avg_20: number; ratio: number };
   reason?: string;
@@ -97,6 +107,7 @@ export function parseKlines(klines: BinanceKline[]): Candle[] {
       close,
       volume: Number(row[5]),
       quoteVolume: Number(row[7]),
+      takerBuyBaseVol: Number(row[9]),
     });
   }
   return candles;
@@ -195,6 +206,20 @@ export function analyzeSymbol(klines: BinanceKline[]): SymbolAnalysis {
   const volAvg = smaLast(volume, 20);
   const volRatio = volAvg > 0 ? volNow / volAvg : 1.0;
 
+  // ── Taker Buy Ratio (orderflow) ──────────────────────────────────────────
+  const takerBuyVolNow = candles[candles.length - 1].takerBuyBaseVol;
+  const takerBuyRatioValue = takerBuyRatio(takerBuyVolNow, volNow);
+
+  // ── Choppiness Index (CHOP 14) ───────────────────────────────────────────
+  const chopValue = choppiness(high, low, close, 14);
+
+  // ── VWAP (20) ────────────────────────────────────────────────────────────
+  const vwapValue = vwap(high, low, close, volume, 20);
+
+  // ── Swing High / Swing Low (20 & 50) ─────────────────────────────────────
+  const swing20 = swingLevels(high, low, 20);
+  const swing50 = swingLevels(high, low, 50);
+
   // ── Trend bias ───────────────────────────────────────────────────────────
   let trend: SymbolAnalysis["trend"];
   if (ema20 > ema50 && ema50 > ema200 && price > ema20) {
@@ -256,6 +281,11 @@ export function analyzeSymbol(klines: BinanceKline[]): SymbolAnalysis {
       avg_20: roundTo(volAvg, 2),
       ratio: roundTo(volRatio, 3),
     },
+    choppiness: Number.isFinite(chopValue) ? roundTo(chopValue, 2) : 20,
+    vwap: Number.isFinite(vwapValue) ? roundTo(vwapValue, 6) : undefined,
+    swing_high: Number.isFinite(swing20.swingHigh) ? roundTo(swing20.swingHigh, 6) : undefined,
+    swing_low: Number.isFinite(swing20.swingLow) ? roundTo(swing20.swingLow, 6) : undefined,
+    taker_buy_ratio: roundTo(takerBuyRatioValue, 4),
   };
 }
 

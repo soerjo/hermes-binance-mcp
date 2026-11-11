@@ -268,6 +268,16 @@ class BinanceClient {
     });
   }
 
+  getOpenInterest(symbol: string): Promise<{ symbol: string; openInterest: string; time: number }> {
+    return this.request("/fapi/v1/openInterest", { params: { symbol } });
+  }
+
+  getTopLongShortRatio(symbol: string, period = "5m", limit = 1): Promise<Array<{ symbol: string; longShortRatio: string; longAccount: string; shortAccount: string; timestamp: number }>> {
+    return this.request("/futures/data/topLongShortAccountRatio", {
+      params: { symbol, period, limit },
+    });
+  }
+
   // ------------------------------------------------------------------
   // Account & positions (signed)
   // ------------------------------------------------------------------
