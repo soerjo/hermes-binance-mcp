@@ -408,120 +408,102 @@ export function createServer(): McpServer {
           };
         }
 
-        // Regime scoring
-        const btc = metrics["BTCUSDT"];
-        const eth = metrics["ETHUSDT"];
-        const sol = metrics["SOLUSDT"];
+        // Regime scoring (continuous, 4 regimes)
+        const btc = metrics["BTCUSDT"] as Record<string, unknown>;
+        const eth = metrics["ETHUSDT"] as Record<string, unknown>;
+        const sol = metrics["SOLUSDT"] as Record<string, unknown>;
 
         const adx4hAvg = ((btc.adx_4h as number) + (eth.adx_4h as number) + (sol.adx_4h as number)) / 3;
         const adx1hAvg = ((btc.adx_1h as number) + (eth.adx_1h as number) + (sol.adx_1h as number)) / 3;
         const bbw4hAvg = ((btc.bbw_4h as number) + (eth.bbw_4h as number) + (sol.bbw_4h as number)) / 3;
         const bbw1hAvg = ((btc.bbw_1h as number) + (eth.bbw_1h as number) + (sol.bbw_1h as number)) / 3;
+        const bbw15Max = Math.max(btc.bbw_15m as number, eth.bbw_15m as number, sol.bbw_15m as number);
+        const chopAvg = ((btc.chop_15m as number) + (eth.chop_15m as number) + (sol.chop_15m as number)) / 3;
 
-        // Alignment: all 3 leaders same trend on 4h
         const trends4h = [btc.trend_4h, eth.trend_4h, sol.trend_4h];
         const allBullish4h = trends4h.every((t) => t === "BULLISH");
         const allBearish4h = trends4h.every((t) => t === "BEARISH");
         const aligned = allBullish4h || allBearish4h;
+        const bullishCount = trends4h.filter((t) => t === "BULLISH").length;
+        const bearishCount = trends4h.filter((t) => t === "BEARISH").length;
+        const hasOpposition = bullishCount > 0 && bearishCount > 0;
+        const majorityAligned = (bullishCount >= 2 && bearishCount === 0) || (bearishCount >= 2 && bullishCount === 0);
 
-        // BTC bias
         let btcBias = "NEUTRAL_RANGE";
         if (btc.trend_4h === "BULLISH" && btc.trend_1h === "BULLISH") btcBias = "BULLISH_BIAS";
         else if (btc.trend_4h === "BEARISH" && btc.trend_1h === "BEARISH") btcBias = "BEARISH_BIAS";
+        const btcVetoLong = btcBias === "BEARISH_BIAS" && (btc.adx_1h as number) >= 22;
+        const btcVetoShort = btcBias === "BULLISH_BIAS" && (btc.adx_1h as number) >= 22;
 
-        // Choppy detection: high CHOP or low ADX
-        const chopAvg = ((btc.chop_15m as number) + (eth.chop_15m as number) + (sol.chop_15m as number)) / 3;
-        const isChoppy = chopAvg > 61.8 || adx4hAvg < 18;
-        const isStrongTrend = adx4hAvg >= 28 && aligned && bbw4hAvg >= 4.5;
-        const isModerate = adx4hAvg >= 18 && adx4hAvg < 28 && bbw1hAvg >= 1.8;
+        const scores = { swing: 0, intraday: 0, scalp: 0, wait_and_see: 0 };
+        const deadMarket = bbw1hAvg < 1.1 && chopAvg > 62;
+        const extremeWhipsaw = bbw15Max > 6.0 && chopAvg > 58;
+        if (deadMarket) scores.wait_and_see += 85;
+        else if (extremeWhipsaw) scores.wait_and_see += 70;
+        else if (chopAvg > 62 && adx4hAvg < 15) scores.wait_and_see += 60;
+        else if (chopAvg > 61.8) scores.wait_and_see += 35;
 
-        // Regime determination
-        let regime: string;
-        let recommended: string;
-        const scores = { swing: 0, intraday: 0, scalp: 0 };
+        if (adx4hAvg >= 26) scores.swing += 30;
+        if (adx4hAvg >= 32) scores.swing += 15;
+        if (aligned) scores.swing += 25;
+        else if (majorityAligned) scores.swing += 12;
+        if (bbw4hAvg >= 3.5) scores.swing += 15;
+        if (bbw4hAvg >= 5.0) scores.swing += 10;
+        if (chopAvg < 45) scores.swing += 10;
+        else if (chopAvg < 55) scores.swing += 5;
+        if (hasOpposition) scores.swing -= 15;
 
-        if (isChoppy) {
-          regime = "CHOPPY_COMPRESSION";
-          recommended = "WAIT_AND_SEE";
-          scores.scalp = 40;
-          scores.intraday = 20;
-          scores.swing = 10;
-        } else if (isStrongTrend) {
-          regime = "MACRO_TREND_EXPANSION";
-          recommended = "swing";
-          scores.swing = 90;
-          scores.intraday = 50;
-          scores.scalp = 20;
-        } else if (isModerate) {
-          regime = "INTRADAY_RANGE_ROTATION";
-          recommended = "intraday";
-          scores.intraday = 80;
-          scores.scalp = 50;
-          scores.swing = 30;
-        } else {
-          regime = "HIGH_VOL_WHIPSAW";
-          recommended = "scalp";
-          scores.scalp = 70;
-          scores.intraday = 40;
-          scores.swing = 15;
+        if (adx4hAvg >= 18 && adx4hAvg <= 30) scores.intraday += 30;
+        else if (adx4hAvg >= 26 && !aligned) scores.intraday += 25;
+        else if (adx4hAvg >= 15 && adx4hAvg < 18) scores.intraday += 15;
+        if (bbw1hAvg >= 1.6) scores.intraday += 20;
+        if (bbw1hAvg >= 2.5) scores.intraday += 10;
+        if (chopAvg >= 40 && chopAvg <= 58) scores.intraday += 15;
+        if (majorityAligned || aligned) scores.intraday += 10;
+
+        if (adx4hAvg < 20) scores.scalp += 25;
+        else if (adx4hAvg < 24) scores.scalp += 10;
+        if (chopAvg >= 54 && chopAvg <= 65) scores.scalp += 20;
+        else if (chopAvg >= 48 && chopAvg < 54) scores.scalp += 10;
+        if (bbw1hAvg >= 1.2 && bbw1hAvg <= 4.0) scores.scalp += 20;
+        if (bbw15Max >= 1.0) scores.scalp += 10;
+        if (aligned && adx4hAvg >= 28) scores.scalp -= 15;
+
+        for (const k of Object.keys(scores) as Array<keyof typeof scores>) {
+          scores[k] = Math.max(0, Math.min(100, Math.round(scores[k])));
         }
+        const entries: Array<[string, number]> = [["swing", scores.swing], ["intraday", scores.intraday], ["scalp", scores.scalp], ["wait_and_see", scores.wait_and_see]];
+        entries.sort((a, b) => b[1] - a[1]);
+        const recommended = entries[0][1] >= 35 ? entries[0][0] : "wait_and_see";
+        const regime = recommended === "swing" ? "MACRO_TREND_EXPANSION" : recommended === "intraday" ? "INTRADAY_RANGE_ROTATION" : recommended === "scalp" ? "CHOPPY_MICRO_RANGE" : (deadMarket ? "DEAD_MARKET" : "HIGH_VOL_WHIPSAW");
 
         const reasons: string[] = [];
-        reasons.push(`ADX 4H avg = ${adx4hAvg.toFixed(1)} (threshold: swing≥28, intraday≥18)`);
-        reasons.push(`BBW 4H avg = ${bbw4hAvg.toFixed(2)}% (swing needs ≥4.5%)`);
-        reasons.push(`BBW 1H avg = ${bbw1hAvg.toFixed(2)}% (intraday needs ≥1.8%)`);
-        reasons.push(`CHOP 15m avg = ${chopAvg.toFixed(1)} (>61.8 = choppy)`);
-        reasons.push(`Leader alignment 4H: ${aligned ? (allBullish4h ? "all BULLISH" : "all BEARISH") : "mixed"}`);
+        reasons.push(`ADX 4H avg = ${adx4hAvg.toFixed(1)} | ADX 1H avg = ${adx1hAvg.toFixed(1)}`);
+        reasons.push(`BBW 4H avg = ${bbw4hAvg.toFixed(2)}% | BBW 1H avg = ${bbw1hAvg.toFixed(2)}% | BBW 15m max = ${bbw15Max.toFixed(2)}%`);
+        reasons.push(`CHOP 15m avg = ${chopAvg.toFixed(1)} (>61.8 = choppy, <45 = clean trend)`);
+        reasons.push(`Leader alignment 4H: ${aligned ? (allBullish4h ? "all BULLISH" : "all BEARISH") : majorityAligned ? "majority (no opposition)" : "mixed"}`);
         reasons.push(`BTC bias: ${btcBias}`);
+        reasons.push(`Scores → Swing ${scores.swing} | Intraday ${scores.intraday} | Scalp ${scores.scalp} | Wait ${scores.wait_and_see}`);
+        if (btcVetoLong) reasons.push("BTC Impulse Bearish → VETO all LONG signals on altcoins");
+        if (btcVetoShort) reasons.push("BTC Impulse Bullish → VETO all SHORT signals on altcoins");
 
-        // Suggested targets based on recommended style
         const suggestedTargets: Record<string, unknown> = {};
         if (recommended === "swing") {
-          suggestedTargets.tp_target_pct = 6.0;
-          suggestedTargets.sl_atr_mult = 2.0;
-          suggestedTargets.be_trigger_pct = 2.8;
-          suggestedTargets.partial_tp_pct = 4.2;
-          suggestedTargets.chandelier_pct = 7.0;
-          suggestedTargets.leverage_min = 5;
-          suggestedTargets.leverage_def = 8;
-          suggestedTargets.leverage_max = 10;
-          suggestedTargets.max_risk_pct = 2.2;
+          Object.assign(suggestedTargets, { tp_target_pct: 6.0, sl_atr_mult: 2.0, be_trigger_pct: 2.8, partial_tp_pct: 4.2, chandelier_pct: 7.0, leverage_min: 5, leverage_def: 8, leverage_max: 10, max_risk_pct: 2.2 });
         } else if (recommended === "intraday") {
-          suggestedTargets.tp_target_pct = 2.4;
-          suggestedTargets.sl_atr_mult = 1.5;
-          suggestedTargets.be_trigger_pct = 1.8;
-          suggestedTargets.partial_tp_pct = 2.2;
-          suggestedTargets.chandelier_pct = 4.0;
-          suggestedTargets.leverage_min = 10;
-          suggestedTargets.leverage_def = 15;
-          suggestedTargets.leverage_max = 20;
-          suggestedTargets.max_risk_pct = 2.0;
+          Object.assign(suggestedTargets, { tp_target_pct: 2.4, sl_atr_mult: 1.5, be_trigger_pct: 1.8, partial_tp_pct: 2.2, chandelier_pct: 4.0, leverage_min: 10, leverage_def: 15, leverage_max: 20, max_risk_pct: 2.0 });
         } else if (recommended === "scalp") {
-          suggestedTargets.tp_target_pct = 1.4;
-          suggestedTargets.sl_atr_mult = 1.2;
-          suggestedTargets.be_trigger_pct = 1.0;
-          suggestedTargets.partial_tp_pct = 1.3;
-          suggestedTargets.chandelier_pct = 2.0;
-          suggestedTargets.leverage_min = 10;
-          suggestedTargets.leverage_def = 15;
-          suggestedTargets.leverage_max = 20;
-          suggestedTargets.max_risk_pct = 1.8;
+          Object.assign(suggestedTargets, { tp_target_pct: 1.4, sl_atr_mult: 1.2, be_trigger_pct: 1.0, partial_tp_pct: 1.3, chandelier_pct: 2.0, leverage_min: 10, leverage_def: 15, leverage_max: 20, max_risk_pct: 1.8 });
         } else {
-          suggestedTargets.tp_target_pct = 0;
-          suggestedTargets.sl_atr_mult = 0;
-          suggestedTargets.be_trigger_pct = 0;
-          suggestedTargets.partial_tp_pct = 0;
-          suggestedTargets.chandelier_pct = 0;
-          suggestedTargets.leverage_min = 0;
-          suggestedTargets.leverage_def = 0;
-          suggestedTargets.leverage_max = 0;
-          suggestedTargets.max_risk_pct = 0;
+          Object.assign(suggestedTargets, { tp_target_pct: 0, sl_atr_mult: 0, be_trigger_pct: 0, partial_tp_pct: 0, chandelier_pct: 0, leverage_min: 0, leverage_def: 0, leverage_max: 0, max_risk_pct: 0 });
         }
 
         return {
           recommended_style: recommended,
           regime,
           btc_bias: btcBias,
+          btc_veto_long: btcVetoLong,
+          btc_veto_short: btcVetoShort,
           scores,
           market_metrics: metrics,
           reasons,
