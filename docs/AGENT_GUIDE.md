@@ -44,6 +44,7 @@
 7. **Confidence minimum**: Sinyal dengan confidence < `MIN_CONFIDENCE` (60) sebaiknya tidak dieksekusi.
 8. **Selalu monitor posisi**: Panggil `monitor_positions` secara berkala (setiap 30 menit) untuk mendeteksi CRITICAL/WARN.
 9. **Jangan retry order setelah POST diterima**: Jika response timeout, cek `get_open_orders` / `get_open_positions` dulu sebelum re-send (hindari order ganda).
+10. **Auto-entry engine adalah domain `crypto-trading-engine`, bukan tool MCP ini.** Untuk menyalakan/mematikan entry otomatis, Agent harus menjalankan CLI engine (lihat `SKILL.md` / `docs/AGENT_GUIDE.md` di repo engine), bukan memanggil `place_futures_order` sendiri berulang-ulang. Default switch: **OFF (manual-only)**; `auto-entry on` HANYA atas permintaan eksplisit pengguna.
 
 ## 4. Daftar Tool (23) & Cara Pakai
 
