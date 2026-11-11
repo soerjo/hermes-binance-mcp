@@ -11,6 +11,7 @@
 import { BINANCE_FUTURES_URL, BINANCE_SPOT_URL, config } from "../config";
 import { createLogger } from "../logger";
 import { markPriceStream } from "./ws-stream";
+import { ensureDohTunnel, stopDohTunnel } from "./doh-tunnel";
 import type {
   AccountInfo,
   AlgoOrder,
@@ -140,8 +141,12 @@ class BinanceClient {
         init.body = encode(cleanParams(params));
       }
 
-      if (this.proxy) {
-        (init as Record<string, unknown>).proxy = this.proxy;
+      let effectiveProxy = this.proxy;
+      if (!effectiveProxy && config.dohEnabled) {
+        effectiveProxy = await ensureDohTunnel();
+      }
+      if (effectiveProxy) {
+        (init as Record<string, unknown>).proxy = effectiveProxy;
       }
 
       let response: Response;

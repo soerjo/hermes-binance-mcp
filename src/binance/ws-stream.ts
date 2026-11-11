@@ -44,10 +44,16 @@ class MarkPriceStream {
       return;
     }
     if (config.proxy) {
-      // Bun's WebSocket has no proxy option. Inside the Gluetun sidecar no proxy
-      // is needed; when a proxy IS configured, prefer REST to avoid leaking a
-      // direct connection.
+      // Bun's WebSocket has no proxy option. When a proxy IS configured, prefer
+      // REST to avoid leaking a direct connection.
       log.info("Proxy configured — using REST for mark prices (WebSocket skipped)");
+      return;
+    }
+    if (config.dohEnabled) {
+      // The DoH tunnel only carries HTTP CONNECT (REST). Bun's WebSocket has
+      // no proxy option, so a direct WS would still hit the poisoned DNS.
+      // Prefer REST (routed through the DoH tunnel) for mark prices.
+      log.info("DoH tunnel active — using REST for mark prices (WebSocket skipped)");
       return;
     }
 
