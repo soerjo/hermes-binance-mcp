@@ -1,0 +1,7 @@
+node_modules
+legacy_python
+__pycache__
+.git
+.env
+*.log
+vpn

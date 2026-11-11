@@ -87,10 +87,39 @@ def analyze_symbol(klines: list) -> dict:
     bb_width = bb_upper - bb_lower
     bb_pct_b = float((price - bb_lower) / bb_width) if bb_width != 0 else 0.5
 
-    # ── ATR(14) ──────────────────────────────────────────────────────────────
+    # ── ATR(14) & ADX(14) ────────────────────────────────────────────────────
     atr_val = float(ta.volatility.AverageTrueRange(
         df["high"], df["low"], df["close"], window=14
     ).average_true_range().iloc[-1])
+
+    try:
+        adx_ind = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
+        adx_val = float(adx_ind.adx().iloc[-1])
+    except Exception:
+        adx_val = 20.0
+
+    # ── Price Action & Candle Exhaustion (Last 2 Candles) ────────────────────
+    prev_c = df.iloc[-2]
+    curr_c = df.iloc[-1]
+    p_open, p_high, p_low, p_close = float(prev_c["open"]), float(prev_c["high"]), float(prev_c["low"]), float(prev_c["close"])
+    c_open, c_high, c_low, c_close = float(curr_c["open"]), float(curr_c["high"]), float(curr_c["low"]), float(curr_c["close"])
+
+    p_range = max(p_high - p_low, 1e-10)
+    p_lower_wick = (min(p_open, p_close) - p_low) / p_range
+    p_upper_wick = (p_high - max(p_open, p_close)) / p_range
+    c_is_bullish = c_close >= c_open
+    c_is_bearish = c_close <= c_open
+
+    falling_knife = bool(p_close < p_open and p_lower_wick < 0.15 and c_close < p_low)
+    rocket_chasing = bool(p_close > p_open and p_upper_wick < 0.15 and c_close > p_high)
+    bullish_rejection = bool(
+        not falling_knife
+        and (p_lower_wick >= 0.35 or (p_close > p_open and c_close >= p_close) or (c_is_bullish and c_close > p_close))
+    )
+    bearish_rejection = bool(
+        not rocket_chasing
+        and (p_upper_wick >= 0.35 or (p_close < p_open and c_close <= p_close) or (c_is_bearish and c_close < p_close))
+    )
 
     # ── Volume ───────────────────────────────────────────────────────────────
     vol_now = float(df["volume"].iloc[-1])
@@ -140,6 +169,15 @@ def analyze_symbol(klines: list) -> dict:
             "bandwidth": round(bb_width / bb_mid * 100, 4) if bb_mid else 0,
         },
         "atr": round(atr_val, 6),
+        "adx": round(adx_val, 2),
+        "candle_action": {
+            "prev_lower_wick_pct": round(p_lower_wick, 4),
+            "prev_upper_wick_pct": round(p_upper_wick, 4),
+            "bullish_rejection": bullish_rejection,
+            "bearish_rejection": bearish_rejection,
+            "falling_knife": falling_knife,
+            "rocket_chasing": rocket_chasing,
+        },
         "volume": {
             "current": round(vol_now, 2),
             "avg_20":  round(vol_avg, 2),
