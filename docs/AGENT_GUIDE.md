@@ -158,7 +158,7 @@ Gluetun VPN sidecar: gunakan `docker-compose.vpn.yml` jika perlu proxy. DoH auto
 | `skill/SKILL.md` | Skill definition untuk Hermes |
 | `skills/trading/binance-futures-bot/` | Skill prompts (morning_scan, funding_alert, position_monitor) |
 | `cron/*.yaml` | Cron job definitions |
-| `legacy_python/` | Sumber Python lama (referensi) |
+| (git history) | Sumber Python lama tersimpan di riwayat commit Git (referensi/rollback) |
 
 ## 9. Referensi Cepat: Argumen Penting
 

@@ -4,7 +4,7 @@ Autonomous Binance Futures trading MCP server for [Hermes Agent](https://github.
 Exposes **23 tools** via MCP so Hermes can scan markets, generate signals, and execute orders.
 
 Rewritten in **Bun + TypeScript** for low-latency tool calls. The previous Python
-implementation is preserved in [`legacy_python/`](legacy_python/) for reference.
+Python implementation is preserved in the Git commit history for reference and rollback.
 
 ## Architecture
 
