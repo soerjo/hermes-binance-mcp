@@ -75,7 +75,8 @@ All limits are environment-overridable (`MAX_RISK_PER_TRADE_PCT`,
 
 > **Catatan trading otomatis**: order otomatis dikendalikan oleh engine
 > `crypto-trading-engine` (global switch `auto-entry`, default OFF). MCP hanya
-> menyediakan tool; cron scan default **hanya melapor**, tidak auto-execute.
+> menyediakan tool; scan & position monitor terjadwal dijalankan oleh daemon
+> engine, dan cron MCP yang tersisa (`funding_alert`) hanya melapor.
 
 ## Quick Start
 
@@ -135,6 +136,7 @@ mcp_servers:
 ```bash
 mkdir -p ~/.hermes/skills/trading/
 cp -r skills/trading/binance-futures-bot ~/.hermes/skills/trading/
+# cron/ hanya berisi binance_funding_alert.yaml — scan & monitor ada di engine
 cp cron/binance_*.yaml ~/.hermes/cron/
 ```
 
@@ -149,11 +151,15 @@ Restart Hermes gateway, lalu bilang ke Hermes: **"scan market sekarang"**.
 
 ## Cron Schedules
 
+Scan dan position monitor **tidak** dijadwalkan dari MCP — keduanya dijalankan
+oleh daemon `crypto-trading-engine` (`scanner` + `sentinel`) agar tidak ada dua
+guardian yang saling menimpa SL/TP.
+
 | Job | Schedule | Action |
 |---|---|---|
-| `binance_morning_scan` | `0 0,12 * * *` | 07:00 + 19:00 WIB — scan & **laporkan** (tanpa auto-execute) |
-| `binance_position_monitor` | `*/30 * * * *` | Monitor posisi, auto-close critical loss |
-| `binance_funding_alert` | `55 7,15,23 * * *` | Alert 5 menit sebelum funding time |
+| `binance_funding_alert` | `55 7,15,23 * * *` | Alert 5 menit sebelum funding time (komplementer) |
+| ~~`binance_morning_scan`~~ | — | Dinonaktifkan → `cron/disabled/` (domain engine `scanner`) |
+| ~~`binance_position_monitor`~~ | — | Dinonaktifkan → `cron/disabled/` (domain engine `sentinel`) |
 
 ## Proxy (IP Block)
 

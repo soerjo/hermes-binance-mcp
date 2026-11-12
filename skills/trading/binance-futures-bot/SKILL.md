@@ -64,20 +64,21 @@ Load and apply this skill when Mas says anything like:
 - "cek posisi / posisi saat ini / portfolio"
 - "monitor trading / cek PnL"
 - "rekomendasi trade / sinyal hari ini"
-- Cron task: `binance_morning_scan` / `binance_position_monitor` / `binance_funding_alert`
+- Cron task: `binance_funding_alert` (scan & position monitor adalah domain engine daemon)
 
 ---
 
-## Workflow 1: Morning Market Scan (Cron 07:00 + 19:00)
+## Workflow 1: Market Scan (engine, on-demand)
 
-**Trigger:** Cron `binance_morning_scan` atau Mas minta scan.
+**Trigger:** Mas minta scan, atau engine daemon `scanner` (3 sektor) berjalan.
 
-1. Call `get_account_status` → cek balance & kapasitas (max 5 posisi)
-2. Call `scan_market(top_n=15, interval="15m")` → dapatkan ranked opportunities
-3. Untuk setiap sinyal menonjol:
-   - Call `analyze_mtf(symbol)` → detail full TA
-   - Call `recommend_trading_style` → konteks rezim pasar & BTC bias
-4. Susun laporan singkat:
+1. **Scanning rutin dijalankan oleh `crypto-trading-engine`**, bukan cron MCP.
+   Untuk scan manual: `bun run src/index.ts scanner` di repo engine.
+2. Jika Mas minta analisa ad-hoc, MCP hanya sumber data:
+   - Call `get_account_status` → cek balance & kapasitas (max 5 posisi)
+   - Call `scan_market(top_n=15, interval="15m")` → ranked opportunities
+   - Call `analyze_mtf(symbol)` + `recommend_trading_style` untuk kandidat
+3. Susun laporan singkat:
    ```
    📊 Market Scan — {waktu}
    Balance: ${balance} | Posisi: {open}/{max}
@@ -89,11 +90,10 @@ Load and apply this skill when Mas says anything like:
 
    ⚠️ Watch: {symbol2} — menunggu konfirmasi
    ```
-5. **Jangan eksekusi otomatis dari cron.** Cron scan hanya melapor. Order
-   baru terjadi bila: Mas minta eksplisit (`eksekusi SYMBOL` via engine),
-   atau engine auto-entry switch ON (otorisasi Mas, tercatat di
-   `auto_entry_state.json`). Jika score 55–69: laporkan, tunggu konfirmasi.
-6. Score < 55: skip, tidak dilaporkan.
+4. **Jangan eksekusi otomatis dari hasil scan.** Order baru terjadi bila:
+   Mas minta eksplisit (`eksekusi SYMBOL` via engine), atau engine auto-entry
+   switch ON (otorisasi Mas, tercatat di `auto_entry_state.json`).
+5. Score < 55: skip, tidak dilaporkan.
 
 ---
 
@@ -101,31 +101,33 @@ Load and apply this skill when Mas says anything like:
 
 **Trigger:** Mas minta buka posisi spesifik.
 
-1. Parse intent: symbol, side, leverage (default 20x)
-2. `get_account_status` → cek balance & posisi terbuka
-3. `analyze_market(symbol)` → ambil ATR untuk auto SL/TP
-4. `get_funding_rates([symbol])` → cek funding rate
-5. `place_futures_order(symbol, side, leverage)` → eksekusi
-   - SL/TP dihitung otomatis dari ATR jika tidak disebutkan Mas
-6. Konfirmasi ke Mas: entry price, SL, TP, qty, leverage
+1. Parse intent: symbol, side, leverage (default sesuai profil engine)
+2. **Jalankan `bun run src/index.ts execute SYMBOL` di `crypto-trading-engine`.**
+   Jalur ini memvalidasi ulang sinyal, memakai SL/TP anti-wick sesuai profil,
+   menyimpan posisi ke `crypto_trading_state.json`, dan mengirim
+   `client_order_id` untuk idempotensi.
+3. Konfirmasi ke Mas: entry price, SL, TP, qty, leverage.
 
-**Jika Mas sebut SL/TP manual:**
-- Gunakan nilai dari Mas, bukan auto-calc
-- Tetap validasi risk rules (max 2% balance per trade)
+**Fallback manual (hanya jika engine tidak tersedia):**
+- `get_account_status` → `analyze_market(symbol)` → `place_futures_order`
+  dengan `client_order_id` unik.
+- Sadari konsekuensinya: posisi tidak tercatat lengkap di state engine,
+  sehingga sentinel tidak bisa mengawal breakeven/partial TP/trailing.
+- Jika Mas sebut SL/TP manual, gunakan nilai Mas dan tetap validasi risk rules.
 
 ---
 
-## Workflow 3: Position Monitor (Cron tiap 30 menit)
+## Workflow 3: Position Monitor (engine sentinel)
 
-**Trigger:** Cron `binance_position_monitor`.
+**Trigger:** Mas minta cek posisi secara manual. **Bukan cron.**
 
-1. `monitor_positions()` → dapatkan status semua posisi
-2. Untuk setiap posisi:
-   - **CRITICAL** (rugi > 3% margin): `close_position(symbol)` + Telegram alert 🔴
-   - **TRAIL_STOP** (profit > 3%): Hitung SL baru (breakeven+), update via cancel+replace
-   - **WARN**: Telegram notification ⚠️ (no auto-action)
-   - **OK**: Silent
-3. Jika ada aksi, kirim ringkasan ke Telegram
+- Penjagaan posisi 24/7 adalah tugas daemon `sentinel` di
+  `crypto-trading-engine` (interval 30 detik): hard cut, anti-wick
+  confirmation, breakeven, partial TP, dan chandelier trail.
+- Untuk cek manual: `monitor_positions()` lalu laporkan status. Jangan
+  auto-close / auto-geser SL dari MCP — serahkan aksi ke engine.
+- Jika engine tidak berjalan, laporkan ke Mas; jangan menggantikannya dengan
+  cron monitor MCP.
 
 ---
 
@@ -136,7 +138,7 @@ Load and apply this skill when Mas says anything like:
 1. `get_open_positions()` → list posisi terbuka
 2. `get_funding_rates([symbols])` → cek rate setiap posisi
 3. Kalkulasi funding yang akan dibayar/diterima per posisi
-4. Jika ada posisi yang akan bayar funding > $5: alert ke Mas
+4. Jika total payment > $2 atau rate > 0.05%: alert ke Mas
 5. Format: "💸 Funding in 5min: {symbol} bayar ${amount} (rate: {rate}%)"
 
 ---
@@ -207,11 +209,11 @@ Top Peluang:
 Watchlist: {list} | Rezim: {recommended_style}
 ```
 
-### 🔴 Position Alert
+### 🔴 Position Alert (report only — aksi oleh engine sentinel)
 ```
 🔴 CRITICAL ALERT — {symbol}
 PnL: -${loss} ({pct}%)
-Action: AUTO-CLOSE EXECUTED
+Action: engine sentinel handles the cut (MCP only reports)
 ```
 
 ### 💰 Position Closed

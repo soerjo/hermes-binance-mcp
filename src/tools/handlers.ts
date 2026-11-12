@@ -417,13 +417,41 @@ export function createServer(): McpServer {
         const data: Record<string, Record<string, SymbolAnalysis>> = {};
         await Promise.all(
           leaders.map(async (sym) => {
-            const ks = await Promise.all(ivs.map((iv) => client.getKlines(sym, iv, iv === "1d" ? 60 : 210)));
-            data[sym] = {};
-            ivs.forEach((iv, i) => {
-              data[sym][iv] = analyzeSymbol(ks[i]);
-            });
+            try {
+              const ks = await Promise.all(ivs.map((iv) => client.getKlines(sym, iv, iv === "1d" ? 60 : 210)));
+              const perTimeframe: Record<string, SymbolAnalysis> = {};
+              ivs.forEach((iv, i) => {
+                perTimeframe[iv] = analyzeSymbol(ks[i]);
+              });
+              // Assign only after every timeframe parsed, so a partial failure
+              // is treated as missing data by the guard below.
+              data[sym] = perTimeframe;
+            } catch {
+              // Leader unavailable — handled by the INSUFFICIENT_DATA guard below.
+            }
           }),
         );
+
+        // Fail-safe parity with crypto-trading-engine/src/regime.ts: if any of
+        // BTC/ETH/SOL cannot be read, hold new entries instead of scoring a
+        // regime from partial data.
+        const missing = leaders.filter((sym) => !data[sym]);
+        if (missing.length > 0) {
+          return {
+            recommended_style: "wait_and_see",
+            regime: "INSUFFICIENT_DATA",
+            btc_bias: "NEUTRAL_RANGE",
+            btc_veto_long: false,
+            btc_veto_short: false,
+            scores: { scalp: 0, intraday: 0, swing: 0, wait_and_see: 100 },
+            market_metrics: {},
+            reasons: [
+              `Regime data incomplete: missing ${missing.join(", ")}. Holding new entries.`,
+            ],
+            suggested_targets: {},
+            auto_switch_available: true,
+          };
+        }
 
         // Compute metrics per leader
         const metrics: Record<string, Record<string, unknown>> = {};

@@ -45,7 +45,10 @@
 5. **Leverage maksimum**: `MAX_LEVERAGE` (default 25x). Server menolak leverage di atas batas.
 6. **Funding rate**: Hindari entry saat `|funding_rate| >= 0.001` (0.1%) atau dalam blackout window (30 menit sebelum funding).
 7. **Confidence minimum**: Sinyal dengan confidence < `MIN_CONFIDENCE` (60) sebaiknya tidak dieksekusi.
-8. **Selalu monitor posisi**: Panggil `monitor_positions` secara berkala (setiap 30 menit) untuk mendeteksi CRITICAL/WARN.
+8. **Guard posisi didelegasikan ke engine**: `crypto-trading-engine` daemon
+   (`sentinel`, 30 detik) adalah satu-satunya position guardian. Jangan
+   menjalankan loop monitoring otomatis dari MCP; `monitor_positions` hanya
+   untuk cek manual/on-demand saat Mas meminta.
 9. **Idempotensi**: selalu sertakan `client_order_id` (unik per rencana entry) saat memanggil `place_futures_order`. Jika call diulang karena retry/gangguan dengan key yang sama, server akan lookup dulu dan menolak duplikasi (`status: DUPLICATE_SUPPRESSED`). Tanpa key: jangan retry setelah POST — cek `get_open_orders` / `get_open_positions` dulu.
 10. **Auto-entry engine adalah domain `crypto-trading-engine`, bukan tool MCP ini.** Untuk menyalakan/mematikan entry otomatis, Agent harus menjalankan CLI engine (lihat `SKILL.md` / `docs/AGENT_GUIDE.md` di repo engine), bukan memanggil `place_futures_order` sendiri berulang-ulang. Default switch: **OFF (manual-only)**; `auto-entry on` HANYA atas permintaan eksplisit pengguna.
 
@@ -105,21 +108,33 @@ Status `place_futures_order`: `FILLED_PROTECTED` (entry fill + SL & TP armed), `
 
 ## 5. Workflow Agent yang Direkomendasikan
 
-### 5.1 Morning Scan (Cron 07:00 & 19:00 WIB)
-1. `get_account_status` → cek balance & kapasitas (max `MAX_OPEN_POSITIONS`)
-2. `scan_market(top_n=15, interval="4h")` → ranked opportunities
-3. Untuk setiap sinyal dengan score ≥ 65: `analyze_market(symbol, "4h")` atau `analyze_mtf(symbol)`
-4. Auto-execute jika score ≥ 70 dan posisi terbuka < 3 (gunakan `place_futures_order`)
-5. Kirim laporan ke Telegram
+> **Pembagian tanggung jawab:** penjadwalan scan dan penjagaan posisi adalah
+> domain `crypto-trading-engine`. MCP ini menyediakan data & eksekusi
+> level-bawah. Jangan menjalankan cron scan/monitor dari MCP secara paralel
+> dengan daemon engine — keduanya akan saling menimpa SL/TP dan state.
 
-### 5.2 Position Monitor (Cron */30 menit)
-1. `monitor_positions()` → health check semua posisi
-2. Jika tidak ada posisi: selesai tanpa laporan
-3. CRITICAL (rugi > 3% margin): `close_position(symbol)` + alert Telegram 🔴
-4. TRAIL_STOP (profit > 3%): update SL ke breakeven + lapor Telegram ✅
-5. WARN: kirim notifikasi ⚠️ tanpa tindakan
+### 5.1 Market Scan Terjadwal (engine)
+- **Scanning rutin:** `crypto-trading-engine` daemon (`scanner` loop, 3 sektor,
+  MTF confluence, filter TradFi/illiquid, BTC Compass Veto).
+- **On-demand:** `bun run src/index.ts scanner` di repo engine.
+- MCP hanya dipakai sebagai sumber data mentah jika Mas minta analisa ad-hoc:
+  1. `get_account_status` → cek balance & kapasitas (max `MAX_OPEN_POSITIONS`)
+  2. `scan_market(top_n=15, interval="15m")` → ranked opportunities
+  3. `analyze_mtf(symbol)` + `recommend_trading_style` untuk kandidat menonjol
+  4. Susun laporan; **jangan eksekusi order dari hasil scan**
+- Hasil scan engine tersimpan di `last_recommendations.json` dan menjadi dasar
+  `execute SYMBOL`.
 
-### 5.3 Funding Alert (Cron 5 menit sebelum funding time)
+### 5.2 Position Monitor (engine sentinel, bukan cron MCP)
+- `crypto-trading-engine` daemon `sentinel` berjalan tiap **30 detik** dan
+  menangani cut-loss, anti-wick confirmation, breakeven, partial TP, dan
+  chandelier trail berdasarkan state `crypto_trading_state.json`.
+- `monitor_positions` di MCP hanya untuk **cek manual** saat Mas meminta
+  ("cek posisi"). Jangan auto-close dari sini; serahkan aksi ke engine.
+- Jika engine tidak berjalan, laporkan ke Mas — jangan menggantikannya dengan
+  cron MCP.
+
+### 5.3 Funding Alert (Cron MCP — komplementer)
 1. `get_open_positions()` → ambil posisi terbuka
 2. Jika tidak ada posisi: selesai
 3. `get_funding_rates(symbols)` → cek rate per posisi
@@ -127,8 +142,14 @@ Status `place_futures_order`: `FILLED_PROTECTED` (entry fill + SL & TP armed), `
 5. Kirim alert jika total payment > $2 atau rate > 0.05%
 
 ### 5.4 Instant Execution (Mas ketik "eksekusi SYMBOL")
-- Gunakan `crypto-trading-engine` CLI: `bun run src/index.ts execute SYMBOL` (lebih cepat, pakai cache rekomendasi).
-- Atau langsung via MCP: `place_futures_order(symbol, side, ...)`.
+- **Satu-satunya jalur yang direkomendasikan:** `crypto-trading-engine` CLI
+  `bun run src/index.ts execute SYMBOL`. Jalur ini memvalidasi ulang sinyal,
+  menghitung SL/TP anti-wick sesuai profil aktif, menyimpan posisi ke state
+  engine, dan mengirim `client_order_id` untuk idempotensi.
+- Memanggil `place_futures_order` langsung dari Hermes hanya untuk kasus
+  manual yang eksplisit dan tidak boleh menjadi kebiasaan: posisi tersebut
+  tidak tercatat lengkap di `crypto_trading_state.json`, sehingga sentinel
+  tidak dapat mengawalnya (breakeven/partial TP/trailing).
 
 ## 6. Best Practices untuk Agent
 
@@ -167,9 +188,8 @@ verifikasi read-only, batas kewenangan, rollback):
 | `src/ta/indicators.ts` | Float64Array indicators |
 | `src/risk/precision.ts` | BigInt step/tick rounding |
 | `src/risk/engine.ts` | Risk rules (position sizing, pre-trade, health) |
-| `skill/SKILL.md` | Skill definition untuk Hermes |
-| `skills/trading/binance-futures-bot/` | Skill prompts (morning_scan, funding_alert, position_monitor) |
-| `cron/*.yaml` | Cron job definitions |
+| `skills/trading/binance-futures-bot/` | Skill definition + prompts untuk Hermes (scan/eksekusi diarahkan ke engine) |
+| `cron/*.yaml` | Cron definitions — `binance_funding_alert` aktif; scan & position monitor dipindah ke `cron/disabled/` (domain engine) |
 | (git history) | Sumber Python lama tersimpan di riwayat commit Git (referensi/rollback) |
 
 ## 9. Referensi Cepat: Argumen Penting
