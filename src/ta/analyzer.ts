@@ -40,6 +40,7 @@ export interface Candle {
   quoteVolume: number;
   takerBuyBaseVol: number;
   openTime: number;
+  closeTime: number;
 }
 
 export interface CandleAction {
@@ -101,6 +102,7 @@ export function parseKlines(klines: BinanceKline[]): Candle[] {
     if (!Number.isFinite(close)) continue;
     candles.push({
       openTime: Number(row[0]),
+      closeTime: Number(row[6]),
       open: Number(row[1]),
       high: Number(row[2]),
       low: Number(row[3]),
@@ -130,7 +132,14 @@ export function analyzeSymbol(klines: BinanceKline[]): SymbolAnalysis {
     };
   }
 
-  const candles = parseKlines(klines);
+  const parsed = parseKlines(klines);
+  // Drop the last bar if it is still forming (its close time is in the future).
+  // This prevents indicators from being computed on a partial candle.
+  const now = Date.now();
+  const dropLast = parsed.length > 0 && parsed[parsed.length - 1].closeTime > now;
+  const candles = dropLast && parsed.length - 1 >= MIN_CANDLES
+    ? parsed.slice(0, -1)
+    : parsed;
   if (candles.length < MIN_CANDLES) {
     return {
       signal: "SKIP",
