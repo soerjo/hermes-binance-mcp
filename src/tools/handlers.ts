@@ -643,6 +643,18 @@ export function createServer(): McpServer {
   );
 
   server.registerTool(
+    "get_open_algo_orders",
+    {
+      description: "Get all open conditional algo orders (STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET) for a symbol or all symbols.",
+      inputSchema: {
+        symbol: z.string().optional().describe("filter by symbol, or omit for all symbols"),
+      },
+    },
+    async ({ symbol }: { symbol?: string }) =>
+      safe("get_open_algo_orders", async () => getClient().getOpenAlgoOrders(symbol)),
+  );
+
+  server.registerTool(
     "get_spot_account_status",
     {
       description:
