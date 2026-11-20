@@ -1,7 +1,7 @@
 # hermes-binance-mcp
 
 Autonomous Binance Futures trading MCP server for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
-Exposes **26 tools** via MCP so Hermes can scan markets, generate signals, and execute orders.
+Exposes **27 tools** via MCP so Hermes can scan markets, generate signals, and execute orders.
 
 Rewritten in **Bun + TypeScript** for low-latency tool calls. The previous Python
 Python implementation is preserved in the Git commit history for reference and rollback.
@@ -16,7 +16,7 @@ Hermes Agent
     ▼
 binance-mcp (Bun)
     ├── src/index.ts          dual transport (stdio / legacy SSE)
-    ├── src/tools/handlers.ts 26 MCP tools
+    ├── src/tools/handlers.ts 27 MCP tools
     ├── src/binance/client.ts Binance REST (HMAC, proxy, keep-alive)
     ├── src/binance/ws-stream.ts mark-price WebSocket cache
     ├── src/ta/               RSI · MACD · EMA · BB · ATR · ADX
@@ -41,6 +41,7 @@ binance-mcp (Bun)
 | `get_account_status` | Balance, margin, open position count |
 | `get_open_positions` | All positions with health status (OK/WARN/CRITICAL) |
 | `get_open_orders` | Pending SL/TP/limit orders |
+| `get_open_algo_orders` | Open conditional/algo orders (STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET) for a symbol or all |
 | `place_futures_order` | Open LONG/SHORT — default sizing = 2% risk rule (kirim `use_auto_sizing=false` + `notional_usdt` untuk notional tetap). SL/TP di-arm SETELAH entry fill; `client_order_id` untuk idempotensi |
 | `close_position` | Market-close 100% of position + cancel its orders |
 | `partial_close_position` | Close partial (e.g. 50%) of active position (MARKET or LIMIT) |

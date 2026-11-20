@@ -7,7 +7,7 @@
 - **Repo**: `soerjo/hermes-binance-mcp`
 - **Runtime**: Bun (TypeScript), port default `8811` (SSE) atau stdio.
 - **Transport**: `MCP_TRANSPORT=stdio` (default, untuk subprocess Hermes) atau `sse` (container/HTTP).
-- **Fungsi**: Menyediakan 26 MCP tool untuk data pasar Binance USDT-M Futures + Spot, analisis teknikal, manajemen risiko, dan eksekusi order.
+- **Fungsi**: Menyediakan 27 MCP tool untuk data pasar Binance USDT-M Futures + Spot, analisis teknikal, manajemen risiko, dan eksekusi order.
 - **Keamanan jaringan**: Built-in DoH auto-tunnel (bypass DNS poisoning ISP Indonesia) aktif otomatis bila `BINANCE_PROXY` kosong.
 
 ## 2. Konfigurasi Environment (`.env`)
@@ -52,7 +52,7 @@
 9. **Idempotensi**: selalu sertakan `client_order_id` (unik per rencana entry) saat memanggil `place_futures_order`. Jika call diulang karena retry/gangguan dengan key yang sama, server akan lookup dulu dan menolak duplikasi (`status: DUPLICATE_SUPPRESSED`). Tanpa key: jangan retry setelah POST — cek `get_open_orders` / `get_open_positions` dulu.
 10. **Auto-entry engine adalah domain `crypto-trading-engine`, bukan tool MCP ini.** Untuk menyalakan/mematikan entry otomatis, Agent harus menjalankan CLI engine (lihat `SKILL.md` / `docs/AGENT_GUIDE.md` di repo engine), bukan memanggil `place_futures_order` sendiri berulang-ulang. Default switch: **OFF (manual-only)**; `auto-entry on` HANYA atas permintaan eksplisit pengguna.
 
-## 4. Daftar Tool (26) & Cara Pakai
+## 4. Daftar Tool (27) & Cara Pakai
 
 ### Market Data
 
@@ -72,7 +72,8 @@
 | :--- | :--- | :--- |
 | `get_account_status` | (none) | `total_wallet_balance`, `total_margin_balance`, `available_balance`, `open_positions_count`, `can_trade`, `usdt{}` |
 | `get_open_positions` | (none) | Array posisi: `symbol`, `side`, `entry_price`, `mark_price`, `qty`, `unrealized_pnl`, `leverage`, `margin_type`, `initial_margin`, `status`, `action`, `roe_pct`, `price_move_pct`, `reason` |
-| `get_open_orders` | `symbol` (opsional) | Array order terbuka |
+| `get_open_orders` | `symbol` (opsional) | Array order terbuka (regular) |
+| `get_open_algo_orders` | `symbol` (opsional) | Array conditional/algo orders terbuka (STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET) |
 | `monitor_positions` | (none) | `open_positions`, `total_unrealized_pnl`, `available_balance`, `actions_required[]`, `positions[]` |
 
 ### Futures Orders
@@ -100,7 +101,7 @@ Status `place_futures_order`: `FILLED_PROTECTED` (entry fill + SL & TP armed), `
 | `place_spot_order` | `symbol`, `side` (BUY/SELL), `order_type` (MARKET/LIMIT), `qty`, `quote_qty`, `price`, `time_in_force` | hasil order |
 | `cancel_spot_order` | `symbol`, `order_id`, `client_order_id` | hasil cancel |
 
-### Spot
+### History
 
 | Tool | Args | Output Utama |
 | :--- | :--- | :--- |
@@ -180,7 +181,7 @@ verifikasi read-only, batas kewenangan, rollback):
 
 | File | Fungsi |
 | :--- | :--- |
-| `src/tools/handlers.ts` | 26 tool registrations (kontrak MCP) |
+| `src/tools/handlers.ts` | 27 tool registrations (kontrak MCP) |
 | `src/binance/client.ts` | REST client (HMAC, retry, time-sync) |
 | `src/binance/ws-stream.ts` | WebSocket mark-price cache |
 | `src/binance/doh-tunnel.ts` | DoH auto-tunnel (bypass DNS poisoning) |
